@@ -37,3 +37,15 @@ jobs:
 
       - name: Build
         run: go build -trimpath ./cmd/server
+
+      - name: Validate Compose files
+        env:
+          POSTGRES_PASSWORD: ci-only-postgres-password
+          MASTER_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+          docker compose -f docker-compose.postgres.yml config --quiet
+
+      - name: Build container
+        run: docker build --tag codexone:ci .
