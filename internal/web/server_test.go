@@ -1,0 +1,258 @@
+package web
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/Ankairis/CodexOne/internal/codex"
+	"github.com/Ankairis/CodexOne/internal/config"
+	"github.com/Ankairis/CodexOne/internal/cryptox"
+	appLog "github.com/Ankairis/CodexOne/internal/logging"
+	"github.com/Ankairis/CodexOne/internal/proxy"
+	"github.com/Ankairis/CodexOne/internal/security"
+	"github.com/Ankairis/CodexOne/internal/session"
+	"github.com/Ankairis/CodexOne/internal/store"
+)
+
+func TestV1ResponsesUsesAPIKeyAndFixedCodexIdentity(t *testing.T) {
+	var upstreamBody map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/backend-api/codex/responses" {
+			t.Errorf("upstream path = %q", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer upstream-access" {
+			t.Errorf("upstream Authorization = %q", got)
+		}
+		if got := r.Header.Get("Chatgpt-Account-Id"); got != "acct_single" {
+			t.Errorf("upstream account ID = %q", got)
+		}
+		if got := r.Header.Get("User-Agent"); got != "codex-tui/0.146.0 (integration-test)" {
+			t.Errorf("upstream User-Agent = %q", got)
+		}
+		if got := r.Header.Get("Originator"); got != "codex-tui" {
+			t.Errorf("upstream Originator = %q", got)
+		}
+		if got := r.Header.Get("Version"); got != "0.146.0" {
+			t.Errorf("upstream Version = %q", got)
+		}
+		if got := r.Header.Get("Session-Id"); got != "session-from-client" {
+			t.Errorf("upstream Session-Id = %q", got)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&upstreamBody); err != nil {
+			t.Errorf("decode upstream body: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("X-Codex-Primary-Used-Percent", "12")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-test\",\"output\":[],\"usage\":{\"input_tokens\":3,\"output_tokens\":2,\"total_tokens\":5}}}\n\n")
+	}))
+	defer upstream.Close()
+
+	handler, database, apiKey, cleanup := testApplication(t, upstream.URL)
+	defer cleanup()
+
+	unauthorized := httptest.NewRecorder()
+	handler.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"hello"}`)))
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized status = %d", unauthorized.Code)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"hello","stream":false,"store":true}`))
+	request.Header.Set("Authorization", "Bearer "+apiKey)
+	request.Header.Set("User-Agent", "downstream-client/9.9")
+	request.Header.Set("Originator", "untrusted-client")
+	request.Header.Set("Session-Id", "session-from-client")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("response status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if got := response.Header().Get("X-Codex-Primary-Used-Percent"); got != "12" {
+		t.Fatalf("quota header = %q", got)
+	}
+	var final map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &final); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if final["id"] != "resp_1" {
+		t.Fatalf("response body = %s", response.Body.String())
+	}
+	if upstreamBody["stream"] != true || upstreamBody["store"] != false {
+		t.Fatalf("upstream body was not normalized: %#v", upstreamBody)
+	}
+	include, _ := upstreamBody["include"].([]any)
+	if len(include) != 1 || include[0] != "reasoning.encrypted_content" {
+		t.Fatalf("upstream include = %#v", upstreamBody["include"])
+	}
+
+	now := time.Now()
+	logs, err := database.ListRequestLogs(context.Background(), now.Add(-time.Minute).UnixMilli(), now.Add(time.Minute).UnixMilli(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 1 || logs[0].InputTokens != 3 || logs[0].OutputTokens != 2 || logs[0].APIKeyID == "" {
+		t.Fatalf("request logs = %#v", logs)
+	}
+}
+
+func TestAdminLoginAndAPIKeyLifecycle(t *testing.T) {
+	upstream := httptest.NewServer(http.NotFoundHandler())
+	defer upstream.Close()
+	handler, _, _, cleanup := testApplication(t, upstream.URL)
+	defer cleanup()
+
+	login := httptest.NewRecorder()
+	loginRequest := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"password":"correct horse battery"}`))
+	handler.ServeHTTP(login, loginRequest)
+	if login.Code != http.StatusOK {
+		t.Fatalf("login status = %d, body = %s", login.Code, login.Body.String())
+	}
+	cookies := login.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Name != sessionCookie || !cookies[0].HttpOnly {
+		t.Fatalf("session cookies = %#v", cookies)
+	}
+
+	create := httptest.NewRecorder()
+	createRequest := httptest.NewRequest(http.MethodPost, "/api/admin/keys", strings.NewReader(`{"name":"desktop"}`))
+	createRequest.Header.Set("Origin", "http://codexone.test")
+	createRequest.AddCookie(cookies[0])
+	handler.ServeHTTP(create, createRequest)
+	if create.Code != http.StatusCreated {
+		t.Fatalf("create key status = %d, body = %s", create.Code, create.Body.String())
+	}
+	var created struct {
+		Key    store.APIKey `json:"key"`
+		Secret string       `json:"secret"`
+	}
+	if err := json.Unmarshal(create.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(created.Secret, "sk-codexone-") || created.Key.Hash != "" {
+		t.Fatalf("created key response = %#v", created)
+	}
+
+	revoke := httptest.NewRecorder()
+	revokeRequest := httptest.NewRequest(http.MethodDelete, "/api/admin/keys/"+created.Key.ID, nil)
+	revokeRequest.Header.Set("Origin", "http://codexone.test")
+	revokeRequest.AddCookie(cookies[0])
+	handler.ServeHTTP(revoke, revokeRequest)
+	if revoke.Code != http.StatusNoContent {
+		t.Fatalf("revoke status = %d, body = %s", revoke.Code, revoke.Body.String())
+	}
+
+	useRevoked := httptest.NewRecorder()
+	useRequest := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	useRequest.Header.Set("Authorization", "Bearer "+created.Secret)
+	handler.ServeHTTP(useRevoked, useRequest)
+	if useRevoked.Code != http.StatusUnauthorized {
+		t.Fatalf("revoked key status = %d", useRevoked.Code)
+	}
+}
+
+func TestEnsureAdminPasswordGeneratesOnlyOnce(t *testing.T) {
+	cfg := config.Config{StorageDriver: "sqlite", SQLitePath: filepath.Join(t.TempDir(), "codexone.db")}
+	database, err := store.Open(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	password, generated, err := EnsureAdminPassword(context.Background(), database, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !generated || len(password) < 12 {
+		t.Fatalf("generated = %v, password length = %d", generated, len(password))
+	}
+	hash, err := database.GetSetting(context.Background(), adminPasswordSetting)
+	if err != nil || !security.CheckPassword(hash, password) {
+		t.Fatalf("generated password was not persisted correctly: %v", err)
+	}
+	secondPassword, generatedAgain, err := EnsureAdminPassword(context.Background(), database, "different-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if generatedAgain || secondPassword != "" {
+		t.Fatalf("password was initialized twice: generated = %v, password = %q", generatedAgain, secondPassword)
+	}
+}
+
+func testApplication(t *testing.T, upstreamURL string) (http.Handler, *store.Store, string, func()) {
+	t.Helper()
+	temp := t.TempDir()
+	cfg := config.Config{
+		PublicURL:          "http://codexone.test",
+		StorageDriver:      "sqlite",
+		SQLitePath:         filepath.Join(temp, "codexone.db"),
+		MasterKeyFile:      filepath.Join(temp, "master.key"),
+		LogPath:            filepath.Join(temp, "codexone.log"),
+		CodexClientVersion: "0.146.0",
+		CodexUserAgent:     "codex-tui/0.146.0 (integration-test)",
+		UpstreamBaseURL:    upstreamURL,
+		MaxRequestBytes:    2 << 20,
+		SessionTTL:         time.Hour,
+		Location:           time.UTC,
+	}
+	ctx := context.Background()
+	database, err := store.Open(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := session.New(ctx, cfg)
+	if err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	cipher, err := cryptox.New(cfg)
+	if err != nil {
+		sessions.Close()
+		database.Close()
+		t.Fatal(err)
+	}
+	logger, ring, logCloser, err := appLog.New(cfg.LogPath)
+	if err != nil {
+		sessions.Close()
+		database.Close()
+		t.Fatal(err)
+	}
+	if _, _, err = EnsureAdminPassword(ctx, database, "correct horse battery"); err != nil {
+		logCloser.Close()
+		sessions.Close()
+		database.Close()
+		t.Fatal(err)
+	}
+	manager := codex.NewManager(cfg, database, cipher, sessions, logger)
+	authJSON := fmt.Sprintf(`{"access_token":"upstream-access","refresh_token":"upstream-refresh","account_id":"acct_single","email":"owner@example.com","expires_at":%d}`, time.Now().Add(time.Hour).Unix())
+	if _, err = manager.ImportAuthJSON(ctx, []byte(authJSON)); err != nil {
+		logCloser.Close()
+		sessions.Close()
+		database.Close()
+		t.Fatal(err)
+	}
+	plain, prefix, hash, err := security.NewAPIKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := store.APIKey{ID: "key_fixture", Name: "fixture", Hash: hash, Prefix: prefix, CreatedAt: time.Now().UnixMilli()}
+	if err = database.CreateAPIKey(ctx, key); err != nil {
+		t.Fatal(err)
+	}
+	proxyService := proxy.New(cfg, manager, database, logger)
+	handler := New(cfg, database, sessions, manager, proxyService, logger, ring)
+	cleanup := func() {
+		_ = logCloser.Close()
+		_ = sessions.Close()
+		_ = database.Close()
+	}
+	return handler, database, plain, cleanup
+}

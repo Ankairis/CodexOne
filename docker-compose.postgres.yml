@@ -1,0 +1,57 @@
+services:
+  codexone:
+    build:
+      context: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      LISTEN_ADDR: ":8080"
+      STORAGE_DRIVER: postgres
+      DATABASE_URL: "postgres://codexone:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/codexone?sslmode=disable"
+      REDIS_URL: redis://redis:6379/0
+      MASTER_KEY: "${MASTER_KEY:?set MASTER_KEY}"
+      LOG_PATH: /data/codexone.log
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - codexone-logs:/data
+    security_opt:
+      - no-new-privileges:true
+
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: codexone
+      POSTGRES_USER: codexone
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}"
+    volumes:
+      - codexone-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U codexone -d codexone"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - codexone-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  codexone-logs:
+  codexone-postgres:
+  codexone-redis:

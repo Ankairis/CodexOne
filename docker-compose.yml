@@ -1,0 +1,22 @@
+services:
+  codexone:
+    build:
+      context: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      LISTEN_ADDR: ":8080"
+      STORAGE_DRIVER: sqlite
+      SQLITE_PATH: /data/codexone.db
+      MASTER_KEY_FILE: /data/master.key
+      LOG_PATH: /data/codexone.log
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - codexone-data:/data
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  codexone-data:

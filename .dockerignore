@@ -1,0 +1,14 @@
+.git
+.github
+.env
+data
+bin
+*.exe
+*.log
+*.db
+*.db-shm
+*.db-wal
+web/node_modules
+web/*.tsbuildinfo
+web/vite.config.js
+web/vite.config.d.ts
