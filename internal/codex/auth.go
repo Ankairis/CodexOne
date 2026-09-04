@@ -429,18 +429,18 @@ func (m *Manager) FreshCredential(ctx context.Context) (Credential, error) {
 	if tokens.IDToken == "" {
 		tokens.IDToken = credential.IDToken
 	}
+	if tokens.AccountID == "" {
+		tokens.AccountID = credential.AccountID
+	}
+	if tokens.Email == "" {
+		tokens.Email = credential.Email
+	}
+	if tokens.PlanType == "" {
+		tokens.PlanType = credential.PlanType
+	}
 	refreshed, err := credentialFromTokens(tokens)
 	if err != nil {
 		return Credential{}, err
-	}
-	if refreshed.AccountID == "" {
-		refreshed.AccountID = credential.AccountID
-	}
-	if refreshed.Email == "" {
-		refreshed.Email = credential.Email
-	}
-	if refreshed.PlanType == "" {
-		refreshed.PlanType = credential.PlanType
 	}
 	if err = m.saveCredential(ctx, refreshed); err != nil {
 		return Credential{}, err

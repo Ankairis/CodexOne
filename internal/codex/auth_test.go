@@ -170,6 +170,54 @@ func TestCredentialReplacementCannotBeOverwrittenByRefresh(t *testing.T) {
 	}
 }
 
+func TestFreshCredentialRetainsMetadataWhenRefreshOmitsClaims(t *testing.T) {
+	ctx := context.Background()
+	temp := t.TempDir()
+	cfg := config.Config{
+		StorageDriver: "sqlite",
+		SQLitePath:    filepath.Join(temp, "codexone.db"),
+		MasterKeyFile: filepath.Join(temp, "master.key"),
+	}
+	database, err := store.Open(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	sessions, err := session.New(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sessions.Close()
+	cipher, err := cryptox.New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(cfg, database, cipher, sessions, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	oldAuth := []byte(`{"access_token":"old-access","refresh_token":"old-refresh","account_id":"acct_old","email":"old@example.com","plan_type":"plus","expires_at":1}`)
+	if _, err = manager.ImportAuthJSON(ctx, oldAuth); err != nil {
+		t.Fatal(err)
+	}
+	manager.client = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		body := `{"access_token":"new-access","expires_in":3600}`
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: request}, nil
+	})}
+
+	credential, err := manager.FreshCredential(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if credential.AccessToken != "new-access" || credential.RefreshToken != "old-refresh" || credential.AccountID != "acct_old" || credential.Email != "old@example.com" || credential.PlanType != "plus" {
+		t.Fatalf("refreshed credential = %#v", credential)
+	}
+	persisted, err := manager.Credential(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.AccessToken != "new-access" || persisted.AccountID != "acct_old" || persisted.Email != "old@example.com" || persisted.PlanType != "plus" {
+		t.Fatalf("persisted credential = %#v", persisted)
+	}
+}
+
 func TestBrowserOAuthFlowUsesPKCEAndPastedCallback(t *testing.T) {
 	ctx := context.Background()
 	temp := t.TempDir()
