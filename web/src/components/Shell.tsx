@@ -37,7 +37,7 @@ export function Shell({ page, session, children, onNavigate, onLogout, notify }:
         <div className="nav-caption">控制台</div>
         <nav className="nav-list" aria-label="主导航">
           {nav.map(({ id, label, icon: Icon }) => (
-            <button key={id} type="button" className={page === id ? 'nav-item active' : 'nav-item'} onClick={() => onNavigate(id)}>
+            <button key={id} type="button" className={page === id ? 'nav-item active' : 'nav-item'} aria-current={page === id ? 'page' : undefined} onClick={() => onNavigate(id)}>
               <Icon size={18} /><span>{label}</span>
               {page === id && <i aria-hidden="true" />}
             </button>
@@ -70,7 +70,7 @@ export function Shell({ page, session, children, onNavigate, onLogout, notify }:
         <div className="page-body">{children}</div>
         <nav className="mobile-nav" aria-label="移动端导航">
           {nav.map(({ id, label, icon: Icon }) => (
-            <button key={id} type="button" className={page === id ? 'active' : ''} onClick={() => onNavigate(id)}><Icon size={18} /><span>{label}</span></button>
+            <button key={id} type="button" className={page === id ? 'active' : ''} aria-current={page === id ? 'page' : undefined} onClick={() => onNavigate(id)}><Icon size={18} /><span>{label}</span></button>
           ))}
         </nav>
       </main>

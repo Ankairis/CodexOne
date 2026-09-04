@@ -29,7 +29,10 @@ export default function App() {
 
   useEffect(() => { void checkSession() }, [checkSession])
   useEffect(() => {
-    const hash = () => setPage(pageFromHash())
+    const hash = () => {
+      setPage(pageFromHash())
+      window.scrollTo({ top: 0, left: 0 })
+    }
     const unauthorized = () => setSession((current) => current ? { ...current, authenticated: false } : current)
     window.addEventListener('hashchange', hash)
     window.addEventListener('codexone:unauthorized', unauthorized)
