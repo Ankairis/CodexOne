@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +23,8 @@ import (
 )
 
 type apiKeyContextKey struct{}
+
+const accountUnavailableClientMessage = "Codex account is unavailable; reconnect it in the admin dashboard"
 
 func WithAPIKey(ctx context.Context, key store.APIKey) context.Context {
 	return context.WithValue(ctx, apiKeyContextKey{}, key)
@@ -84,7 +87,7 @@ func (s *Service) Models(w http.ResponseWriter, r *http.Request) {
 	credential, err := s.auth.FreshCredential(r.Context())
 	if err != nil {
 		status, errText = http.StatusServiceUnavailable, err.Error()
-		writeError(w, status, "account_unavailable", errText, requestID)
+		writeError(w, status, "account_unavailable", accountUnavailableClientMessage, requestID)
 		return
 	}
 	endpoint, _ := url.Parse(s.cfg.UpstreamBaseURL + "/backend-api/codex/models")
@@ -154,7 +157,7 @@ func (s *Service) handleResponsesPath(w http.ResponseWriter, r *http.Request, up
 	credential, err := s.auth.FreshCredential(r.Context())
 	if err != nil {
 		status, errText = http.StatusServiceUnavailable, err.Error()
-		writeError(w, status, "account_unavailable", errText, requestID)
+		writeError(w, status, "account_unavailable", accountUnavailableClientMessage, requestID)
 		return
 	}
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, s.cfg.UpstreamBaseURL+upstreamPath, bytes.NewReader(body))
@@ -192,8 +195,14 @@ func (s *Service) handleResponsesPath(w http.ResponseWriter, r *http.Request, up
 	}
 	final, usage, err := collectResponse(resp.Body)
 	if err != nil {
-		status, errText = http.StatusBadGateway, err.Error()
-		writeError(w, status, "upstream_stream_failed", errText, requestID)
+		var failure *upstreamResponseError
+		if errors.As(err, &failure) {
+			status, errText = failure.HTTPStatus(), failure.Error()
+			writeUpstreamResponseFailure(w, failure, requestID)
+		} else {
+			status, errText = http.StatusBadGateway, err.Error()
+			writeError(w, status, "upstream_stream_failed", errText, requestID)
+		}
 		return
 	}
 	inputTokens, outputTokens = usage.InputTokens, usage.OutputTokens
@@ -222,7 +231,7 @@ func (s *Service) handlePassthroughJSON(w http.ResponseWriter, r *http.Request, 
 	credential, err := s.auth.FreshCredential(r.Context())
 	if err != nil {
 		status, errText = http.StatusServiceUnavailable, err.Error()
-		writeError(w, status, "account_unavailable", errText, requestID)
+		writeError(w, status, "account_unavailable", accountUnavailableClientMessage, requestID)
 		return
 	}
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, s.cfg.UpstreamBaseURL+upstreamPath, bytes.NewReader(body))
@@ -382,7 +391,7 @@ func collectResponse(reader io.Reader) ([]byte, tokenUsage, error) {
 	buffered := bufio.NewReader(reader)
 	var final []byte
 	usage := tokenUsage{}
-	var upstreamErr string
+	var upstreamErr *upstreamResponseError
 	for {
 		line, err := buffered.ReadBytes('\n')
 		if len(line) > 0 {
@@ -391,9 +400,6 @@ func collectResponse(reader io.Reader) ([]byte, tokenUsage, error) {
 				var event struct {
 					Type     string          `json:"type"`
 					Response json.RawMessage `json:"response"`
-					Error    struct {
-						Message string `json:"message"`
-					} `json:"error"`
 				}
 				if json.Unmarshal(payload, &event) == nil {
 					parseResponseUsage(event.Response, &usage)
@@ -401,7 +407,7 @@ func collectResponse(reader io.Reader) ([]byte, tokenUsage, error) {
 						final = append(final[:0], event.Response...)
 					}
 					if event.Type == "error" || event.Type == "response.failed" {
-						upstreamErr = responseFailureMessage(event.Error.Message, event.Response)
+						upstreamErr = parseUpstreamResponseError(payload)
 					}
 				}
 			}
@@ -413,13 +419,117 @@ func collectResponse(reader io.Reader) ([]byte, tokenUsage, error) {
 			return nil, usage, fmt.Errorf("read upstream stream: %w", err)
 		}
 	}
-	if upstreamErr != "" {
-		return nil, usage, fmt.Errorf("upstream error: %s", upstreamErr)
+	if upstreamErr != nil {
+		return nil, usage, upstreamErr
 	}
 	if len(final) == 0 {
 		return nil, usage, fmt.Errorf("upstream stream ended without a completed response")
 	}
 	return final, usage, nil
+}
+
+type upstreamResponseError struct {
+	Status  int
+	Code    string
+	Type    string
+	Message string
+}
+
+func (e *upstreamResponseError) Error() string {
+	return "upstream error: " + e.Message
+}
+
+func (e *upstreamResponseError) HTTPStatus() int {
+	if e.Status >= 400 && e.Status <= 599 {
+		return e.Status
+	}
+	classification := strings.ToLower(strings.TrimSpace(e.Code + " " + e.Type))
+	switch {
+	case strings.Contains(classification, "rate_limit"), strings.Contains(classification, "insufficient_quota"):
+		return http.StatusTooManyRequests
+	case strings.Contains(classification, "permission_denied"):
+		return http.StatusForbidden
+	case strings.Contains(classification, "not_found"):
+		return http.StatusNotFound
+	case strings.Contains(classification, "conflict"):
+		return http.StatusConflict
+	case strings.Contains(classification, "invalid_request"), strings.Contains(classification, "invalid_prompt"), strings.Contains(classification, "context_length"), strings.Contains(classification, "content_policy"):
+		return http.StatusBadRequest
+	default:
+		return http.StatusBadGateway
+	}
+}
+
+type responseFailureFields struct {
+	Message    string          `json:"message"`
+	Code       string          `json:"code"`
+	Type       string          `json:"type"`
+	Status     json.RawMessage `json:"status"`
+	StatusCode int             `json:"status_code"`
+	HTTPStatus int             `json:"http_status"`
+}
+
+func parseUpstreamResponseError(raw []byte) *upstreamResponseError {
+	var event struct {
+		Status     json.RawMessage `json:"status"`
+		StatusCode int             `json:"status_code"`
+		HTTPStatus int             `json:"http_status"`
+		Error      json.RawMessage `json:"error"`
+		Response   json.RawMessage `json:"response"`
+	}
+	_ = json.Unmarshal(raw, &event)
+
+	var topLevel responseFailureFields
+	_ = json.Unmarshal(event.Error, &topLevel)
+	var response struct {
+		Status     json.RawMessage `json:"status"`
+		StatusCode int             `json:"status_code"`
+		HTTPStatus int             `json:"http_status"`
+		Error      json.RawMessage `json:"error"`
+	}
+	_ = json.Unmarshal(event.Response, &response)
+	var nested responseFailureFields
+	_ = json.Unmarshal(response.Error, &nested)
+
+	failure := &upstreamResponseError{
+		Status: firstHTTPStatus(
+			parseHTTPStatus(event.Status), event.StatusCode, event.HTTPStatus,
+			parseHTTPStatus(topLevel.Status), topLevel.StatusCode, topLevel.HTTPStatus,
+			parseHTTPStatus(response.Status), response.StatusCode, response.HTTPStatus,
+			parseHTTPStatus(nested.Status), nested.StatusCode, nested.HTTPStatus,
+		),
+		Code:    firstNonEmpty(topLevel.Code, nested.Code),
+		Type:    firstNonEmpty(topLevel.Type, nested.Type),
+		Message: firstNonEmpty(topLevel.Message, nested.Message),
+	}
+	if failure.Message == "" {
+		failure.Message = "upstream response failed"
+	}
+	return failure
+}
+
+func parseHTTPStatus(raw json.RawMessage) int {
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return 0
+	}
+	var number int
+	if json.Unmarshal(raw, &number) == nil {
+		return number
+	}
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		number, _ = strconv.Atoi(strings.TrimSpace(text))
+	}
+	return number
+}
+
+func firstHTTPStatus(values ...int) int {
+	for _, value := range values {
+		if value >= 400 && value <= 599 {
+			return value
+		}
+	}
+	return 0
 }
 
 func responseFailureMessage(topLevel string, response json.RawMessage) string {
@@ -565,6 +675,17 @@ func convertModels(raw []byte) ([]byte, error) {
 func writeError(w http.ResponseWriter, status int, code, message, requestID string) {
 	payload, _ := json.Marshal(map[string]any{"error": map[string]any{"message": message, "type": code, "code": code}})
 	writeJSONBytes(w, status, payload, requestID)
+}
+
+func writeUpstreamResponseFailure(w http.ResponseWriter, failure *upstreamResponseError, requestID string) {
+	errorType := firstNonEmpty(failure.Type, "upstream_response_failed")
+	errorCode := firstNonEmpty(failure.Code, errorType)
+	payload, _ := json.Marshal(map[string]any{"error": map[string]any{
+		"message": trimText(failure.Message, 500),
+		"type":    errorType,
+		"code":    errorCode,
+	}})
+	writeJSONBytes(w, failure.HTTPStatus(), payload, requestID)
 }
 
 func writeUpstreamError(w http.ResponseWriter, resp *http.Response, body []byte, requestID string) {

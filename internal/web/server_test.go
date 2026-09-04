@@ -111,6 +111,69 @@ func TestV1ResponsesUsesAPIKeyAndFixedCodexIdentity(t *testing.T) {
 	}
 }
 
+func TestNonStreamingEndpointsPreserveResponseFailure(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.failed\",\"response\":{\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"code\":\"context_length_exceeded\",\"message\":\"context is too long\"}}}\n\n")
+	}))
+	defer upstream.Close()
+
+	handler, _, apiKey, cleanup := testApplication(t, upstream.URL)
+	defer cleanup()
+	tests := []struct {
+		path string
+		body string
+	}{
+		{path: "/v1/responses", body: `{"model":"gpt-test","input":"hello","stream":false}`},
+		{path: "/v1/chat/completions", body: `{"model":"gpt-test","messages":[{"role":"user","content":"hello"}],"stream":false}`},
+	}
+	for _, test := range tests {
+		t.Run(test.path, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, test.path, strings.NewReader(test.body))
+			request.Header.Set("Authorization", "Bearer "+apiKey)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+			}
+			var payload struct {
+				Error struct {
+					Message string `json:"message"`
+					Type    string `json:"type"`
+					Code    string `json:"code"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload.Error.Message != "context is too long" || payload.Error.Type != "invalid_request_error" || payload.Error.Code != "context_length_exceeded" {
+				t.Fatalf("error payload = %#v", payload.Error)
+			}
+		})
+	}
+}
+
+func TestAccountFailureDoesNotExposeCredentialDetails(t *testing.T) {
+	upstream := httptest.NewServer(http.NotFoundHandler())
+	defer upstream.Close()
+	handler, database, apiKey, cleanup := testApplication(t, upstream.URL)
+	defer cleanup()
+	if err := database.DeleteAccount(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"hello"}`))
+	request.Header.Set("Authorization", "Bearer "+apiKey)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "no Codex account") || !strings.Contains(response.Body.String(), "reconnect it in the admin dashboard") {
+		t.Fatalf("unsafe account error = %s", response.Body.String())
+	}
+}
+
 func TestAdminLoginAndAPIKeyLifecycle(t *testing.T) {
 	upstream := httptest.NewServer(http.NotFoundHandler())
 	defer upstream.Close()

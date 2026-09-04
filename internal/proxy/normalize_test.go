@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -246,9 +247,20 @@ func TestTranslateChatEventPreservesResponseFailure(t *testing.T) {
 }
 
 func TestCollectResponseReturnsResponseFailure(t *testing.T) {
-	stream := "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"upstream rejected request\"}}}\n\n"
-	if _, _, err := collectResponse(strings.NewReader(stream)); err == nil || !strings.Contains(err.Error(), "upstream rejected request") {
+	stream := "data: {\"type\":\"response.failed\",\"response\":{\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"code\":\"context_length_exceeded\",\"message\":\"upstream rejected request\"}}}\n\n"
+	_, _, err := collectResponse(strings.NewReader(stream))
+	if err == nil || !strings.Contains(err.Error(), "upstream rejected request") {
 		t.Fatalf("collectResponse() error = %v", err)
+	}
+	var failure *upstreamResponseError
+	if !errors.As(err, &failure) || failure.HTTPStatus() != http.StatusBadRequest || failure.Code != "context_length_exceeded" || failure.Type != "invalid_request_error" {
+		t.Fatalf("structured failure = %#v", failure)
+	}
+
+	rateLimitStream := "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"slow down\"}}}\n\n"
+	_, _, err = collectResponse(strings.NewReader(rateLimitStream))
+	if !errors.As(err, &failure) || failure.HTTPStatus() != http.StatusTooManyRequests {
+		t.Fatalf("rate-limit failure = %#v, %v", failure, err)
 	}
 }
 

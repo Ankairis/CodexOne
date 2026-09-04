@@ -38,7 +38,7 @@ func (s *Service) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	credential, err := s.auth.FreshCredential(r.Context())
 	if err != nil {
 		status, errText = http.StatusServiceUnavailable, err.Error()
-		writeError(w, status, "account_unavailable", errText, requestID)
+		writeError(w, status, "account_unavailable", accountUnavailableClientMessage, requestID)
 		return
 	}
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, s.cfg.UpstreamBaseURL+"/backend-api/codex/responses", bytes.NewReader(body))
@@ -74,8 +74,14 @@ func (s *Service) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	final, usage, err := collectResponse(resp.Body)
 	if err != nil {
-		status, errText = http.StatusBadGateway, err.Error()
-		writeError(w, status, "upstream_stream_failed", errText, requestID)
+		var failure *upstreamResponseError
+		if errors.As(err, &failure) {
+			status, errText = failure.HTTPStatus(), failure.Error()
+			writeUpstreamResponseFailure(w, failure, requestID)
+		} else {
+			status, errText = http.StatusBadGateway, err.Error()
+			writeError(w, status, "upstream_stream_failed", errText, requestID)
+		}
 		return
 	}
 	inputTokens, outputTokens = usage.InputTokens, usage.OutputTokens
