@@ -130,11 +130,12 @@ td code { color: #434950; font-size: 10px; }
 .account-empty-icon { width: 54px; height: 54px; display: grid; place-items: center; margin-bottom: 18px; color: var(--green); background: var(--green-soft); border: 1px solid #cae9dd; border-radius: 50%; }
 .account-empty h2 { margin: 0; font-size: 18px; }
 .account-empty p { max-width: 510px; margin: 10px 0 24px; color: #747a80; font-size: 12px; line-height: 1.65; }
-.empty-actions { display: flex; gap: 9px; }
+.empty-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 9px; }
 .compat-line { display: flex; align-items: center; gap: 7px; margin-top: 24px; color: #798079; font-size: 10px; }
 .account-summary { min-height: 116px; display: flex; align-items: center; gap: 16px; padding: 20px; }
 .account-avatar { width: 46px; height: 46px; display: grid; place-items: center; flex: 0 0 auto; color: #4a635b; background: #eef2f0; border-radius: 50%; }
 .account-main { min-width: 0; flex: 1; }
+.account-actions { display: flex; align-items: center; gap: 8px; }
 .account-name { display: flex; align-items: center; gap: 11px; }
 .account-name h2 { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; }
 .account-meta { display: flex; flex-wrap: wrap; gap: 8px 22px; margin-top: 10px; color: #7d8389; font-size: 10px; }
@@ -186,6 +187,10 @@ td code { color: #434950; font-size: 10px; }
 .device-code { height: 72px; display: flex; align-items: center; justify-content: center; gap: 12px; border: 1px dashed #9bb8ae; border-radius: 6px; color: #185f49; background: #f0f8f5; cursor: pointer; }
 .device-code code { font-size: 25px; font-weight: 700; }
 .polling { display: flex; align-items: center; justify-content: center; gap: 7px; color: #7d8389; font-size: 10px; }
+.oauth-steps { display: grid; gap: 8px; margin: 0; padding-left: 20px; color: #62686e; font-size: 11px; line-height: 1.6; }
+.oauth-steps code { overflow-wrap: anywhere; color: #3d514a; }
+.oauth-security { display: flex; align-items: flex-start; gap: 7px; color: #63716c; font-size: 10px; line-height: 1.5; }
+.oauth-security svg { flex: 0 0 auto; color: var(--green); }
 .secret-value { width: 100%; min-height: 76px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px; border: 1px dashed #9ab9ae; border-radius: 6px; color: #195d48; background: #f0f8f5; cursor: pointer; text-align: left; }
 .secret-value code { overflow-wrap: anywhere; font-size: 11px; }
 
@@ -243,7 +248,7 @@ td code { color: #434950; font-size: 10px; }
   .quota-item { border-right: 0; }
   .account-summary { align-items: flex-start; flex-wrap: wrap; }
   .account-main { width: calc(100% - 64px); }
-  .account-summary .danger-button { margin-left: 62px; }
+  .account-summary .account-actions { width: calc(100% - 62px); margin-left: 62px; }
   .account-meta { display: grid; gap: 6px; }
   .empty-actions { width: 100%; flex-direction: column; }
   .empty-actions button { width: 100%; }

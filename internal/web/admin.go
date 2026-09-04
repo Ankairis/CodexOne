@@ -2,11 +2,13 @@ package web
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/Ankairis/CodexOne/internal/codex"
 	"github.com/Ankairis/CodexOne/internal/security"
 	"github.com/Ankairis/CodexOne/internal/store"
 	"github.com/go-chi/chi/v5"
@@ -190,6 +192,39 @@ func (s *Server) pollDeviceLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, status)
+}
+
+func (s *Server) startBrowserLogin(w http.ResponseWriter, r *http.Request) {
+	flow, err := s.codex.StartBrowserFlow(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "browser_login_failed", "could not start browser login")
+		return
+	}
+	writeJSON(w, http.StatusOK, flow)
+}
+
+func (s *Server) completeBrowserLogin(w http.ResponseWriter, r *http.Request) {
+	flowID := chi.URLParam(r, "flowID")
+	if len(flowID) < 16 || len(flowID) > 128 {
+		writeError(w, http.StatusBadRequest, "invalid_flow", "browser login flow is invalid")
+		return
+	}
+	var body struct {
+		CallbackURL string `json:"callback_url"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	view, err := s.codex.CompleteBrowserFlow(r.Context(), flowID, body.CallbackURL)
+	if err != nil {
+		if errors.Is(err, codex.ErrBrowserOAuthInput) {
+			writeError(w, http.StatusBadRequest, "invalid_callback", strings.TrimPrefix(err.Error(), codex.ErrBrowserOAuthInput.Error()+": "))
+			return
+		}
+		writeError(w, http.StatusBadGateway, "browser_login_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
 }
 
 func (s *Server) importAccount(w http.ResponseWriter, r *http.Request) {

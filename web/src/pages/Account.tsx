@@ -1,12 +1,13 @@
 import { FormEvent, useCallback, useEffect, useState } from 'react'
 import { CheckCircle2, Clipboard, Clock3, ExternalLink, FileJson, LoaderCircle, LockKeyhole, LogIn, RefreshCw, ShieldCheck, Unplug, UserRound } from 'lucide-react'
 import { api, copyText } from '../api'
-import { AccountInfo, DeviceFlow, QuotaPayload, RateWindow } from '../types'
+import { AccountInfo, BrowserOAuthFlow, DeviceFlow, QuotaPayload, RateWindow } from '../types'
 import { Modal } from '../components/Modal'
 
 export function Account({ notify }: { notify: (message: string) => void }) {
   const [account, setAccount] = useState<AccountInfo | null>(null)
   const [flow, setFlow] = useState<DeviceFlow | null>(null)
+  const [browserFlow, setBrowserFlow] = useState<BrowserOAuthFlow | null>(null)
   const [importOpen, setImportOpen] = useState(false)
   const [passwordOpen, setPasswordOpen] = useState(false)
   const [loading, setLoading] = useState(true)
@@ -39,13 +40,25 @@ export function Account({ notify }: { notify: (message: string) => void }) {
     return () => { stopped = true; window.clearInterval(timer) }
   }, [flow, notify])
 
-  const startLogin = async () => {
-    setBusy('login'); setError('')
+  const startDeviceLogin = async () => {
+    setBusy('device-login'); setError('')
     try {
       const result = await api<DeviceFlow>('/api/admin/account/device', { method: 'POST' })
+      setBrowserFlow(null)
       setFlow(result)
       window.open(result.verification_url, '_blank', 'noopener,noreferrer')
     } catch (cause) { setError(cause instanceof Error ? cause.message : '无法启动登录') }
+    finally { setBusy('') }
+  }
+
+  const startBrowserLogin = async () => {
+    setBusy('browser-login'); setError('')
+    try {
+      const result = await api<BrowserOAuthFlow>('/api/admin/account/oauth', { method: 'POST' })
+      setFlow(null)
+      setBrowserFlow(result)
+      window.open(result.authorization_url, '_blank', 'noopener,noreferrer')
+    } catch (cause) { setError(cause instanceof Error ? cause.message : '无法启动浏览器登录') }
     finally { setBusy('') }
   }
 
@@ -79,7 +92,8 @@ export function Account({ notify }: { notify: (message: string) => void }) {
           <h2>连接你的 Codex 订阅</h2>
           <p>CodexOne 只保存并使用一个上游账号。再次登录会覆盖当前凭据，不会形成账号池。</p>
           <div className="empty-actions">
-            <button className="primary-button" type="button" onClick={() => void startLogin()} disabled={busy === 'login'}>{busy === 'login' ? <LoaderCircle className="spin" size={17} /> : <LogIn size={17} />}使用设备码登录</button>
+            <button className="primary-button" type="button" onClick={() => void startBrowserLogin()} disabled={busy === 'browser-login'}>{busy === 'browser-login' ? <LoaderCircle className="spin" size={17} /> : <ExternalLink size={17} />}浏览器 OAuth 登录</button>
+            <button className="secondary-button" type="button" onClick={() => void startDeviceLogin()} disabled={busy === 'device-login'}>{busy === 'device-login' ? <LoaderCircle className="spin" size={17} /> : <LogIn size={17} />}使用设备码登录</button>
             <button className="secondary-button" type="button" onClick={() => setImportOpen(true)}><FileJson size={17} />导入 auth.json</button>
           </div>
           <div className="compat-line"><ShieldCheck size={15} />上游身份固定为 {account?.client_name || 'codex-tui'}</div>
@@ -89,7 +103,7 @@ export function Account({ notify }: { notify: (message: string) => void }) {
           <section className="account-summary panel">
             <div className="account-avatar"><UserRound size={24} /></div>
             <div className="account-main"><div className="account-name"><h2>{account.email || 'Codex account'}</h2><span className="status ok"><i />已连接</span></div><div className="account-meta"><span>套餐 <strong>{account.plan_type || quota?.plan_type || '未知'}</strong></span><span>Account ID <code>{account.account_id}</code></span><span>身份 <code>{account.client_name}</code></span></div></div>
-            <button className="danger-button" type="button" onClick={() => void disconnect()}><Unplug size={16} />断开</button>
+            <div className="account-actions"><button className="secondary-button" type="button" onClick={() => void startBrowserLogin()} disabled={busy === 'browser-login'}>{busy === 'browser-login' ? <LoaderCircle className="spin" size={16} /> : <LogIn size={16} />}重新登录</button><button className="danger-button" type="button" onClick={() => void disconnect()}><Unplug size={16} />断开</button></div>
           </section>
           <section className="panel quota-panel">
             <div className="panel-header"><div><h2>订阅额度</h2><span>{account.quota_fetched_at ? `更新于 ${formatDate(account.quota_fetched_at)}` : '尚未读取'}</span></div><button className="secondary-button" type="button" onClick={() => void refreshQuota()} disabled={busy === 'quota'}><RefreshCw className={busy === 'quota' ? 'spin' : ''} size={16} />刷新额度</button></div>
@@ -99,10 +113,25 @@ export function Account({ notify }: { notify: (message: string) => void }) {
         </>
       )}
       {flow && <DeviceModal flow={flow} onClose={() => setFlow(null)} notify={notify} />}
+      {browserFlow && <BrowserOAuthModal flow={browserFlow} onClose={() => setBrowserFlow(null)} onConnected={(value) => { setAccount(value); setBrowserFlow(null); notify('Codex 浏览器登录成功') }} />}
       {importOpen && <ImportModal onClose={() => setImportOpen(false)} onImported={(value) => { setAccount(value); setImportOpen(false); notify('auth.json 已导入') }} />}
       {passwordOpen && <PasswordModal onClose={() => setPasswordOpen(false)} onChanged={() => { setPasswordOpen(false); notify('后台密码已修改') }} />}
     </div>
   )
+}
+
+function BrowserOAuthModal({ flow, onClose, onConnected }: { flow: BrowserOAuthFlow; onClose: () => void; onConnected: (account: AccountInfo) => void }) {
+  const [callbackURL, setCallbackURL] = useState('')
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
+  const submit = async (event: FormEvent) => {
+    event.preventDefault(); setLoading(true); setError('')
+    try {
+      onConnected(await api<AccountInfo>(`/api/admin/account/oauth/${encodeURIComponent(flow.flow_id)}/callback`, { method: 'POST', body: JSON.stringify({ callback_url: callbackURL }) }))
+    } catch (cause) { setError(cause instanceof Error ? cause.message : '回调登录失败') }
+    finally { setLoading(false) }
+  }
+  return <Modal title="Codex 浏览器 OAuth 登录" onClose={onClose} width="wide"><form className="modal-body oauth-flow" onSubmit={submit}><ol className="oauth-steps"><li>打开 OpenAI 授权页并完成登录。</li><li>浏览器跳到 <code>{flow.redirect_uri}</code> 后，页面显示“无法访问”也属于正常现象。</li><li>复制地址栏里的完整 localhost URL，粘贴到下方完成登录。</li></ol><a className="primary-button full" href={flow.authorization_url} target="_blank" rel="noreferrer"><ExternalLink size={17} />打开 OpenAI 授权页</a><label htmlFor="oauth-callback">localhost 回调 URL<textarea id="oauth-callback" className="code-input" value={callbackURL} onChange={(event) => setCallbackURL(event.target.value)} placeholder={`${flow.redirect_uri}?code=...&state=...`} rows={4} autoFocus /></label><div className="oauth-security"><ShieldCheck size={15} />PKCE verifier 只保存在服务端；回调 state 必须与本次登录完全一致。</div>{error && <div className="form-error">{error}</div>}<div className="modal-actions"><button className="secondary-button" type="button" onClick={onClose}>取消</button><button className="primary-button" type="submit" disabled={!callbackURL.trim() || loading}>{loading && <LoaderCircle className="spin" size={16} />}粘贴并完成登录</button></div></form></Modal>
 }
 
 function DeviceModal({ flow, onClose, notify }: { flow: DeviceFlow; onClose: () => void; notify: (message: string) => void }) {

@@ -3,6 +3,8 @@ package codex
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -25,13 +27,18 @@ import (
 
 const (
 	clientID                    = "app_EMoamEEZ73f0CkXaXp7hrann"
+	authAuthorizeURL            = "https://auth.openai.com/oauth/authorize"
 	authTokenURL                = "https://auth.openai.com/oauth/token"
+	browserRedirectURI          = "http://localhost:1455/auth/callback"
 	deviceUserCodeURL           = "https://auth.openai.com/api/accounts/deviceauth/usercode"
 	deviceTokenURL              = "https://auth.openai.com/api/accounts/deviceauth/token"
 	deviceVerificationURL       = "https://auth.openai.com/codex/device"
 	deviceTokenExchangeRedirect = "https://auth.openai.com/deviceauth/callback"
 	deviceFlowTTL               = 15 * time.Minute
+	browserFlowTTL              = 15 * time.Minute
 )
+
+var ErrBrowserOAuthInput = errors.New("invalid browser OAuth input")
 
 type Credential struct {
 	Email        string
@@ -67,6 +74,13 @@ type DeviceStart struct {
 type DeviceStatus struct {
 	Status  string      `json:"status"`
 	Account AccountView `json:"account,omitempty"`
+}
+
+type BrowserStart struct {
+	FlowID           string `json:"flow_id"`
+	AuthorizationURL string `json:"authorization_url"`
+	RedirectURI      string `json:"redirect_uri"`
+	ExpiresAt        int64  `json:"expires_at"`
 }
 
 type Manager struct {
@@ -203,7 +217,7 @@ func (m *Manager) PollDeviceFlow(ctx context.Context, flowID string) (DeviceStat
 	if tokenCode.AuthorizationCode == "" || tokenCode.CodeVerifier == "" {
 		return DeviceStatus{}, fmt.Errorf("device login response is incomplete")
 	}
-	tokens, err := m.exchangeCode(ctx, tokenCode.AuthorizationCode, tokenCode.CodeVerifier)
+	tokens, err := m.exchangeCode(ctx, tokenCode.AuthorizationCode, tokenCode.CodeVerifier, deviceTokenExchangeRedirect)
 	if err != nil {
 		return DeviceStatus{}, err
 	}
@@ -218,6 +232,85 @@ func (m *Manager) PollDeviceFlow(ctx context.Context, flowID string) (DeviceStat
 	m.logger.Info("codex account connected", "email", credential.Email, "plan", credential.PlanType)
 	view, err := m.Account(ctx)
 	return DeviceStatus{Status: "complete", Account: view}, err
+}
+
+func (m *Manager) StartBrowserFlow(ctx context.Context) (BrowserStart, error) {
+	state, err := security.RandomToken(24)
+	if err != nil {
+		return BrowserStart{}, fmt.Errorf("generate OAuth state: %w", err)
+	}
+	verifier, err := security.RandomToken(96)
+	if err != nil {
+		return BrowserStart{}, fmt.Errorf("generate PKCE verifier: %w", err)
+	}
+	flowID, err := security.RandomToken(24)
+	if err != nil {
+		return BrowserStart{}, fmt.Errorf("generate browser flow ID: %w", err)
+	}
+	flow := browserFlow{State: state, Verifier: verifier, ExpiresAt: time.Now().Add(browserFlowTTL).UnixMilli()}
+	encoded, err := json.Marshal(flow)
+	if err != nil {
+		return BrowserStart{}, fmt.Errorf("encode browser OAuth flow: %w", err)
+	}
+	if err = m.sessions.Put(ctx, "oauth-browser:"+flowID, string(encoded), browserFlowTTL); err != nil {
+		return BrowserStart{}, fmt.Errorf("store browser OAuth flow: %w", err)
+	}
+	challenge := sha256.Sum256([]byte(verifier))
+	authorizationURL := browserAuthorizationURL(state, base64.RawURLEncoding.EncodeToString(challenge[:]))
+	m.logger.Info("codex browser login started", "flow_id", flowID[:8])
+	return BrowserStart{
+		FlowID:           flowID,
+		AuthorizationURL: authorizationURL,
+		RedirectURI:      browserRedirectURI,
+		ExpiresAt:        flow.ExpiresAt,
+	}, nil
+}
+
+func (m *Manager) CompleteBrowserFlow(ctx context.Context, flowID, callbackURL string) (AccountView, error) {
+	rawFlow, err := m.sessions.Get(ctx, "oauth-browser:"+flowID)
+	if err != nil {
+		if errors.Is(err, session.ErrNotFound) {
+			return AccountView{}, browserOAuthInputError("browser login expired or was not found")
+		}
+		return AccountView{}, err
+	}
+	var flow browserFlow
+	if err = json.Unmarshal([]byte(rawFlow), &flow); err != nil {
+		return AccountView{}, fmt.Errorf("decode browser OAuth flow: %w", err)
+	}
+	if time.Now().UnixMilli() >= flow.ExpiresAt {
+		_ = m.sessions.Delete(ctx, "oauth-browser:"+flowID)
+		return AccountView{}, browserOAuthInputError("browser login expired")
+	}
+	callback, err := parseBrowserCallback(callbackURL)
+	if err != nil {
+		return AccountView{}, err
+	}
+	if callback.Error != "" {
+		_ = m.sessions.Delete(ctx, "oauth-browser:"+flowID)
+		detail := callback.Error
+		if callback.ErrorDescription != "" {
+			detail += ": " + callback.ErrorDescription
+		}
+		return AccountView{}, browserOAuthInputError("OpenAI authorization failed: %s", detail)
+	}
+	if len(callback.State) != len(flow.State) || subtle.ConstantTimeCompare([]byte(callback.State), []byte(flow.State)) != 1 {
+		return AccountView{}, browserOAuthInputError("OAuth state does not match; restart login and paste the new callback URL")
+	}
+	tokens, err := m.exchangeCode(ctx, callback.Code, flow.Verifier, browserRedirectURI)
+	if err != nil {
+		return AccountView{}, err
+	}
+	credential, err := credentialFromTokens(tokens)
+	if err != nil {
+		return AccountView{}, err
+	}
+	if err = m.save(ctx, credential); err != nil {
+		return AccountView{}, err
+	}
+	_ = m.sessions.Delete(ctx, "oauth-browser:"+flowID)
+	m.logger.Info("codex account connected", "email", credential.Email, "plan", credential.PlanType, "method", "browser_callback")
+	return m.Account(ctx)
 }
 
 func (m *Manager) ImportAuthJSON(ctx context.Context, raw []byte) (AccountView, error) {
@@ -434,12 +527,12 @@ func (m *Manager) save(ctx context.Context, credential Credential) error {
 	})
 }
 
-func (m *Manager) exchangeCode(ctx context.Context, code, verifier string) (tokenSet, error) {
+func (m *Manager) exchangeCode(ctx context.Context, code, verifier, redirectURI string) (tokenSet, error) {
 	values := url.Values{
 		"grant_type":    {"authorization_code"},
 		"client_id":     {clientID},
 		"code":          {code},
-		"redirect_uri":  {deviceTokenExchangeRedirect},
+		"redirect_uri":  {redirectURI},
 		"code_verifier": {verifier},
 	}
 	return m.requestTokens(ctx, values, "exchange Codex authorization code")
@@ -486,6 +579,85 @@ type deviceFlow struct {
 	UserCode     string `json:"user_code"`
 	ExpiresAt    int64  `json:"expires_at"`
 	Interval     int    `json:"interval"`
+}
+
+type browserFlow struct {
+	State     string `json:"state"`
+	Verifier  string `json:"verifier"`
+	ExpiresAt int64  `json:"expires_at"`
+}
+
+type browserCallback struct {
+	Code             string
+	State            string
+	Error            string
+	ErrorDescription string
+}
+
+func browserAuthorizationURL(state, challenge string) string {
+	values := url.Values{
+		"client_id":                  {clientID},
+		"response_type":              {"code"},
+		"redirect_uri":               {browserRedirectURI},
+		"scope":                      {"openid email profile offline_access"},
+		"state":                      {state},
+		"code_challenge":             {challenge},
+		"code_challenge_method":      {"S256"},
+		"prompt":                     {"login"},
+		"id_token_add_organizations": {"true"},
+		"codex_cli_simplified_flow":  {"true"},
+	}
+	return authAuthorizeURL + "?" + values.Encode()
+}
+
+func parseBrowserCallback(input string) (browserCallback, error) {
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "" || len(trimmed) > 16<<10 {
+		return browserCallback{}, browserOAuthInputError("paste the complete localhost callback URL")
+	}
+	candidate := trimmed
+	switch {
+	case strings.HasPrefix(candidate, "?"):
+		candidate = browserRedirectURI + candidate
+	case !strings.Contains(candidate, "://") && strings.Contains(candidate, "=") && !strings.ContainsAny(candidate, "/?#"):
+		candidate = browserRedirectURI + "?" + candidate
+	case !strings.Contains(candidate, "://"):
+		candidate = "http://" + candidate
+	}
+	parsed, err := url.Parse(candidate)
+	if err != nil {
+		return browserCallback{}, browserOAuthInputError("callback URL is malformed")
+	}
+	if parsed.Scheme != "http" || !strings.EqualFold(parsed.Hostname(), "localhost") || parsed.Port() != "1455" || parsed.EscapedPath() != "/auth/callback" {
+		return browserCallback{}, browserOAuthInputError("callback must start with %s", browserRedirectURI)
+	}
+	values := parsed.Query()
+	if parsed.Fragment != "" {
+		if fragment, fragmentErr := url.ParseQuery(parsed.Fragment); fragmentErr == nil {
+			for _, name := range []string{"code", "state", "error", "error_description"} {
+				if values.Get(name) == "" && fragment.Get(name) != "" {
+					values.Set(name, fragment.Get(name))
+				}
+			}
+		}
+	}
+	callback := browserCallback{
+		Code:             strings.TrimSpace(values.Get("code")),
+		State:            strings.TrimSpace(values.Get("state")),
+		Error:            strings.TrimSpace(values.Get("error")),
+		ErrorDescription: strings.TrimSpace(values.Get("error_description")),
+	}
+	if callback.Error == "" && callback.Code == "" {
+		return browserCallback{}, browserOAuthInputError("callback URL does not contain an authorization code")
+	}
+	if callback.Error == "" && callback.State == "" {
+		return browserCallback{}, browserOAuthInputError("callback URL does not contain OAuth state")
+	}
+	return callback, nil
+}
+
+func browserOAuthInputError(format string, args ...any) error {
+	return fmt.Errorf("%w: %s", ErrBrowserOAuthInput, fmt.Sprintf(format, args...))
 }
 
 type tokenSet struct {

@@ -63,6 +63,8 @@ func New(cfg config.Config, database *store.Store, sessions session.Store, codex
 		admin.Delete("/api/admin/account", server.deleteAccount)
 		admin.Post("/api/admin/account/device", server.startDeviceLogin)
 		admin.Get("/api/admin/account/device/{flowID}", server.pollDeviceLogin)
+		admin.Post("/api/admin/account/oauth", server.startBrowserLogin)
+		admin.Post("/api/admin/account/oauth/{flowID}/callback", server.completeBrowserLogin)
 		admin.Post("/api/admin/account/import", server.importAccount)
 		admin.Post("/api/admin/account/quota", server.refreshQuota)
 		admin.Get("/api/admin/keys", server.listAPIKeys)

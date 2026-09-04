@@ -89,6 +89,13 @@ export type DeviceFlow = {
   poll_interval: number
 }
 
+export type BrowserOAuthFlow = {
+  flow_id: string
+  authorization_url: string
+  redirect_uri: string
+  expires_at: number
+}
+
 export type APIKey = {
   id: string
   name: string

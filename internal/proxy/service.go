@@ -308,8 +308,10 @@ func (s *Service) record(r *http.Request, requestID, model string, status int, s
 }
 
 type tokenUsage struct {
-	InputTokens  int64
-	OutputTokens int64
+	InputTokens        int64
+	OutputTokens       int64
+	ReasoningTokens    int64
+	HasReasoningTokens bool
 }
 
 func collectResponse(reader io.Reader) ([]byte, tokenUsage, error) {
@@ -375,8 +377,11 @@ func parseResponseUsage(response json.RawMessage, usage *tokenUsage) {
 	}
 	var payload struct {
 		Usage struct {
-			InputTokens  int64 `json:"input_tokens"`
-			OutputTokens int64 `json:"output_tokens"`
+			InputTokens        int64 `json:"input_tokens"`
+			OutputTokens       int64 `json:"output_tokens"`
+			OutputTokenDetails struct {
+				ReasoningTokens *int64 `json:"reasoning_tokens"`
+			} `json:"output_tokens_details"`
 		} `json:"usage"`
 	}
 	if json.Unmarshal(response, &payload) == nil {
@@ -385,6 +390,10 @@ func parseResponseUsage(response json.RawMessage, usage *tokenUsage) {
 		}
 		if payload.Usage.OutputTokens > 0 {
 			usage.OutputTokens = payload.Usage.OutputTokens
+		}
+		if payload.Usage.OutputTokenDetails.ReasoningTokens != nil {
+			usage.ReasoningTokens = *payload.Usage.OutputTokenDetails.ReasoningTokens
+			usage.HasReasoningTokens = true
 		}
 	}
 }

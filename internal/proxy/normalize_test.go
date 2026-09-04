@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"encoding/json"
+	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -55,6 +57,7 @@ func TestNormalizeResponsesRequest(t *testing.T) {
 func TestConvertChatRequest(t *testing.T) {
 	raw := []byte(`{
 		"model":"gpt-test",
+		"reasoning_effort":"high",
 		"stream":true,
 		"stream_options":{"include_usage":true},
 		"messages":[
@@ -79,6 +82,10 @@ func TestConvertChatRequest(t *testing.T) {
 	if body["instructions"] != "Be concise." {
 		t.Fatalf("instructions = %v", body["instructions"])
 	}
+	reasoning := body["reasoning"].(map[string]any)
+	if reasoning["effort"] != "high" || reasoning["summary"] != "auto" {
+		t.Fatalf("reasoning = %#v", reasoning)
+	}
 	input := body["input"].([]any)
 	if len(input) != 3 {
 		t.Fatalf("input count = %d, want 3", len(input))
@@ -92,14 +99,30 @@ func TestConvertChatRequest(t *testing.T) {
 	}
 }
 
+func TestConvertChatRequestDefaultsReasoningToMedium(t *testing.T) {
+	result, _, _, _, err := convertChatRequest([]byte(`{"model":"gpt-test","messages":[{"role":"user","content":"hello"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err = json.Unmarshal(result, &body); err != nil {
+		t.Fatal(err)
+	}
+	reasoning := body["reasoning"].(map[string]any)
+	if reasoning["effort"] != "medium" || reasoning["summary"] != "auto" {
+		t.Fatalf("default reasoning = %#v", reasoning)
+	}
+}
+
 func TestConvertChatResponse(t *testing.T) {
 	raw := []byte(`{
 		"id":"resp_1","model":"gpt-test","created_at":100,
 		"output":[
+			{"type":"reasoning","summary":[{"type":"summary_text","text":"checked the inputs"}]},
 			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]},
 			{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"}
 		],
-		"usage":{"input_tokens":10,"output_tokens":4,"total_tokens":14}
+		"usage":{"input_tokens":10,"output_tokens":4,"total_tokens":14,"output_tokens_details":{"reasoning_tokens":3}}
 	}`)
 	result, err := convertChatResponse(raw)
 	if err != nil {
@@ -116,6 +139,40 @@ func TestConvertChatResponse(t *testing.T) {
 	message := choice["message"].(map[string]any)
 	if message["content"] != "done" || len(message["tool_calls"].([]any)) != 1 {
 		t.Fatalf("message = %#v", message)
+	}
+	if message["reasoning_content"] != "checked the inputs" {
+		t.Fatalf("reasoning_content = %#v", message["reasoning_content"])
+	}
+	usage := body["usage"].(map[string]any)
+	details := usage["completion_tokens_details"].(map[string]any)
+	if details["reasoning_tokens"] != float64(3) {
+		t.Fatalf("usage = %#v", usage)
+	}
+}
+
+func TestTranslateChatEventPreservesReasoningAndUsage(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	state := &chatStreamState{model: "gpt-test", created: 100, tools: make(map[int]int)}
+	events := []string{
+		`{"type":"response.created","response":{"id":"resp_1","model":"gpt-test","created_at":100}}`,
+		`{"type":"response.reasoning_summary_text.delta","delta":"check inputs"}`,
+		`{"type":"response.reasoning_summary_text.done"}`,
+		`{"type":"response.output_text.delta","delta":"done"}`,
+		`{"type":"response.completed","response":{"id":"resp_1","model":"gpt-test","usage":{"input_tokens":10,"output_tokens":4,"output_tokens_details":{"reasoning_tokens":3}}}}`,
+	}
+	for _, event := range events {
+		if err := translateChatEvent(recorder, recorder, []byte(event), state, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	output := recorder.Body.String()
+	for _, want := range []string{`"reasoning_content":"check inputs"`, `"reasoning_content":"\n\n"`, `"content":"done"`, `"reasoning_tokens":3`, "data: [DONE]"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("stream output does not contain %q:\n%s", want, output)
+		}
+	}
+	if !state.usage.HasReasoningTokens || state.usage.ReasoningTokens != 3 {
+		t.Fatalf("stream usage = %#v", state.usage)
 	}
 }
 

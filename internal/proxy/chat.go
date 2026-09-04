@@ -95,7 +95,10 @@ func convertChatRequest(raw []byte) ([]byte, bool, bool, string, error) {
 		StreamOptions     map[string]any   `json:"stream_options"`
 		ParallelToolCalls *bool            `json:"parallel_tool_calls"`
 		ReasoningEffort   string           `json:"reasoning_effort"`
-		PromptCacheKey    string           `json:"prompt_cache_key"`
+		Reasoning         struct {
+			Effort string `json:"effort"`
+		} `json:"reasoning"`
+		PromptCacheKey string `json:"prompt_cache_key"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
@@ -182,9 +185,18 @@ func convertChatRequest(raw []byte) ([]byte, bool, bool, string, error) {
 	if request.ParallelToolCalls != nil {
 		responses["parallel_tool_calls"] = *request.ParallelToolCalls
 	}
-	if request.ReasoningEffort != "" {
-		responses["reasoning"] = map[string]any{"effort": request.ReasoningEffort, "summary": "auto"}
+	reasoningEffort := strings.TrimSpace(request.ReasoningEffort)
+	if reasoningEffort == "" {
+		reasoningEffort = strings.TrimSpace(request.Reasoning.Effort)
 	}
+	if reasoningEffort == "" {
+		reasoningEffort = "medium"
+	}
+	reasoning := map[string]any{"effort": reasoningEffort}
+	if reasoningEffort != "none" {
+		reasoning["summary"] = "auto"
+	}
+	responses["reasoning"] = reasoning
 	if request.PromptCacheKey != "" {
 		responses["prompt_cache_key"] = request.PromptCacheKey
 	}
@@ -268,9 +280,12 @@ func convertChatResponse(raw []byte) ([]byte, error) {
 		CreatedAt int64             `json:"created_at"`
 		Output    []json.RawMessage `json:"output"`
 		Usage     struct {
-			InputTokens  int64 `json:"input_tokens"`
-			OutputTokens int64 `json:"output_tokens"`
-			TotalTokens  int64 `json:"total_tokens"`
+			InputTokens        int64 `json:"input_tokens"`
+			OutputTokens       int64 `json:"output_tokens"`
+			TotalTokens        int64 `json:"total_tokens"`
+			OutputTokenDetails struct {
+				ReasoningTokens *int64 `json:"reasoning_tokens"`
+			} `json:"output_tokens_details"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(raw, &response); err != nil {
@@ -278,6 +293,7 @@ func convertChatResponse(raw []byte) ([]byte, error) {
 	}
 	message := map[string]any{"role": "assistant", "content": ""}
 	textParts := make([]string, 0)
+	reasoningParts := make([]string, 0)
 	toolCalls := make([]any, 0)
 	for _, itemRaw := range response.Output {
 		var item map[string]any
@@ -285,6 +301,28 @@ func convertChatResponse(raw []byte) ([]byte, error) {
 			continue
 		}
 		switch item["type"] {
+		case "reasoning":
+			if summary, ok := item["summary"].([]any); ok {
+				for _, partValue := range summary {
+					part, _ := partValue.(map[string]any)
+					if part["type"] == "summary_text" {
+						if text, _ := part["text"].(string); text != "" {
+							reasoningParts = append(reasoningParts, text)
+						}
+						break
+					}
+				}
+			}
+			if content, ok := item["content"].([]any); ok {
+				for _, partValue := range content {
+					part, _ := partValue.(map[string]any)
+					if part["type"] == "reasoning_text" {
+						if text, _ := part["text"].(string); text != "" {
+							reasoningParts = append(reasoningParts, text)
+						}
+					}
+				}
+			}
 		case "message":
 			if content, ok := item["content"].([]any); ok {
 				for _, partValue := range content {
@@ -302,6 +340,9 @@ func convertChatResponse(raw []byte) ([]byte, error) {
 		}
 	}
 	message["content"] = strings.Join(textParts, "")
+	if len(reasoningParts) > 0 {
+		message["reasoning_content"] = strings.Join(reasoningParts, "")
+	}
 	finishReason := "stop"
 	if len(toolCalls) > 0 {
 		message["tool_calls"] = toolCalls
@@ -311,23 +352,28 @@ func convertChatResponse(raw []byte) ([]byte, error) {
 	if created == 0 {
 		created = time.Now().Unix()
 	}
+	usage := map[string]any{"prompt_tokens": response.Usage.InputTokens, "completion_tokens": response.Usage.OutputTokens, "total_tokens": response.Usage.TotalTokens}
+	if response.Usage.OutputTokenDetails.ReasoningTokens != nil {
+		usage["completion_tokens_details"] = map[string]any{"reasoning_tokens": *response.Usage.OutputTokenDetails.ReasoningTokens}
+	}
 	result := map[string]any{
 		"id": response.ID, "object": "chat.completion", "created": created, "model": response.Model,
 		"choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": finishReason}},
-		"usage":   map[string]any{"prompt_tokens": response.Usage.InputTokens, "completion_tokens": response.Usage.OutputTokens, "total_tokens": response.Usage.TotalTokens},
+		"usage":   usage,
 	}
 	return json.Marshal(result)
 }
 
 type chatStreamState struct {
-	id           string
-	model        string
-	created      int64
-	roleSent     bool
-	terminalSent bool
-	tools        map[int]int
-	nextTool     int
-	usage        tokenUsage
+	id            string
+	model         string
+	created       int64
+	roleSent      bool
+	reasoningOpen bool
+	terminalSent  bool
+	tools         map[int]int
+	nextTool      int
+	usage         tokenUsage
 }
 
 func streamChatResponse(w http.ResponseWriter, reader io.Reader, requestID, fallbackModel string, includeUsage bool) (int, int64, int64, string) {
@@ -416,6 +462,21 @@ func translateChatEvent(w io.Writer, flusher http.Flusher, payload []byte, state
 	switch event.Type {
 	case "response.created":
 		return ensureRole()
+	case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+		if event.Delta == "" {
+			return nil
+		}
+		if err := ensureRole(); err != nil {
+			return err
+		}
+		state.reasoningOpen = true
+		return send(map[string]any{"reasoning_content": event.Delta}, nil, nil)
+	case "response.reasoning_summary_text.done", "response.reasoning_text.done":
+		if !state.reasoningOpen {
+			return nil
+		}
+		state.reasoningOpen = false
+		return send(map[string]any{"reasoning_content": "\n\n"}, nil, nil)
 	case "response.output_text.delta":
 		if err := ensureRole(); err != nil {
 			return err
@@ -450,7 +511,11 @@ func translateChatEvent(w io.Writer, flusher http.Flusher, payload []byte, state
 		}
 		var usage any
 		if includeUsage {
-			usage = map[string]any{"prompt_tokens": state.usage.InputTokens, "completion_tokens": state.usage.OutputTokens, "total_tokens": state.usage.InputTokens + state.usage.OutputTokens}
+			usageMap := map[string]any{"prompt_tokens": state.usage.InputTokens, "completion_tokens": state.usage.OutputTokens, "total_tokens": state.usage.InputTokens + state.usage.OutputTokens}
+			if state.usage.HasReasoningTokens {
+				usageMap["completion_tokens_details"] = map[string]any{"reasoning_tokens": state.usage.ReasoningTokens}
+			}
+			usage = usageMap
 		}
 		if err := send(map[string]any{}, finish, usage); err != nil {
 			return err

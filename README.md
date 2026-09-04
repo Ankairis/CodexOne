@@ -21,7 +21,7 @@
 管理后台只有三个主页面：
 
 1. **总览**：当天请求数、成功率、平均耗时、token 统计、逐条请求详情和应用日志。
-2. **账号**：Codex 设备码登录、导入官方 `auth.json`、额度查看与刷新、管理员密码修改。
+2. **账号**：Codex 浏览器 PKCE 登录（粘贴 localhost 回调 URL）、设备码登录、导入官方 `auth.json`、额度查看与刷新、管理员密码修改。
 3. **API Key**：创建、查看和撤销 `sk-codexone-*` Key。明文只在创建时显示一次，数据库只存 SHA-256 摘要。
 
 兼容入口：
@@ -32,7 +32,7 @@
 - `POST /v1/responses/input_tokens`
 - `POST /v1/chat/completions`
 
-Responses 与 Chat Completions 均支持流式和非流式调用。
+Responses 与 Chat Completions 均支持流式和非流式调用。Chat Completions 会透传 `reasoning_effort`（未指定时默认 `medium`），并把 Codex 推理摘要映射为 `reasoning_content`，同时返回 `completion_tokens_details.reasoning_tokens`。
 
 ## 快速部署：SQLite
 
@@ -51,7 +51,7 @@ SQLite 数据库、加密主密钥和日志都保存在 `codexone-data` volume�
 
 ## PostgreSQL + Redis 部署
 
-此模式把账号、API Key、请求记录和设置存入 PostgreSQL；Redis 只保存管理员会话与尚未完成的设备登录状态。
+此模式把账号、API Key、请求记录和设置存入 PostgreSQL；Redis 只保存管理员会话与尚未完成的 OAuth/设备码登录状态。
 
 先在 `.env` 中设置：
 
