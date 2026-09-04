@@ -104,6 +104,26 @@ func TestNormalizeResponsesReasoningAliases(t *testing.T) {
 	}
 }
 
+func TestNormalizeResponsesRejectsNullInputAndDropsNullOptions(t *testing.T) {
+	if _, _, _, err := normalizeResponsesRequest([]byte(`{"model":"gpt-test","input":null}`)); err == nil || !strings.Contains(err.Error(), "input is required") {
+		t.Fatalf("null input error = %v", err)
+	}
+
+	result, _, _, err := normalizeResponsesRequest([]byte(`{"model":"gpt-test","input":"hello","tools":null,"reasoning":null}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err = json.Unmarshal(result, &body); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"tools", "reasoning"} {
+		if _, exists := body[field]; exists {
+			t.Fatalf("null optional field %q was forwarded: %s", field, result)
+		}
+	}
+}
+
 func TestConvertChatRequest(t *testing.T) {
 	raw := []byte(`{
 		"model":"gpt-test",
@@ -206,7 +226,9 @@ func TestTranslateChatEventPreservesReasoningAndUsage(t *testing.T) {
 	state := &chatStreamState{model: "gpt-test", created: 100, tools: make(map[int]int), started: time.Now().Add(-time.Second)}
 	events := []string{
 		`{"type":"response.created","response":{"id":"resp_1","model":"gpt-test","created_at":100}}`,
-		`{"type":"response.reasoning_summary_text.delta","delta":"check inputs"}`,
+		`{"type":"response.reasoning_summary_text.delta","delta":"check "}`,
+		`{"type":"response.reasoning_summary_text.done"}`,
+		`{"type":"response.reasoning_summary_text.delta","delta":"inputs"}`,
 		`{"type":"response.reasoning_summary_text.done"}`,
 		`{"type":"response.output_text.delta","delta":"done"}`,
 		`{"type":"response.completed","response":{"id":"resp_1","model":"gpt-test","reasoning":{"effort":"max"},"usage":{"input_tokens":10,"output_tokens":4,"output_tokens_details":{"reasoning_tokens":3}}}}`,
@@ -217,10 +239,13 @@ func TestTranslateChatEventPreservesReasoningAndUsage(t *testing.T) {
 		}
 	}
 	output := recorder.Body.String()
-	for _, want := range []string{`"reasoning_content":"check inputs"`, `"reasoning_content":"\n\n"`, `"content":"done"`, `"reasoning_tokens":3`, `"choices":[]`, "data: [DONE]"} {
+	for _, want := range []string{`"reasoning_content":"check "`, `"reasoning_content":"inputs"`, `"content":"done"`, `"reasoning_tokens":3`, `"choices":[]`, "data: [DONE]"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("stream output does not contain %q:\n%s", want, output)
 		}
+	}
+	if strings.Contains(output, `"reasoning_content":"\n\n"`) {
+		t.Fatalf("stream output contains a synthetic reasoning separator:\n%s", output)
 	}
 	if !state.usage.HasReasoningTokens || state.usage.ReasoningTokens != 3 {
 		t.Fatalf("stream usage = %#v", state.usage)

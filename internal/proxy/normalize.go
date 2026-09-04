@@ -23,18 +23,25 @@ func normalizeResponsesRequest(raw []byte) ([]byte, bool, string, error) {
 		return nil, false, "", fmt.Errorf("model is required")
 	}
 
-	if input, ok := body["input"].(string); ok {
+	input, hasInput := body["input"]
+	if !hasInput || input == nil {
+		return nil, false, "", fmt.Errorf("input is required")
+	}
+	if input, ok := input.(string); ok {
 		body["input"] = []any{map[string]any{
 			"type":    "message",
 			"role":    "user",
 			"content": []any{map[string]any{"type": "input_text", "text": input}},
 		}}
 	}
-	if _, ok := body["input"]; !ok {
-		return nil, false, "", fmt.Errorf("input is required")
-	}
 	if body["instructions"] == nil {
 		body["instructions"] = ""
+	}
+	if body["tools"] == nil {
+		delete(body, "tools")
+	}
+	if body["reasoning"] == nil {
+		delete(body, "reasoning")
 	}
 	body["stream"] = true
 	body["store"] = false

@@ -382,17 +382,16 @@ func convertChatResponse(raw []byte) ([]byte, error) {
 }
 
 type chatStreamState struct {
-	id            string
-	model         string
-	created       int64
-	roleSent      bool
-	reasoningOpen bool
-	terminalSent  bool
-	tools         map[int]int
-	nextTool      int
-	usage         tokenUsage
-	telemetry     requestTelemetry
-	started       time.Time
+	id           string
+	model        string
+	created      int64
+	roleSent     bool
+	terminalSent bool
+	tools        map[int]int
+	nextTool     int
+	usage        tokenUsage
+	telemetry    requestTelemetry
+	started      time.Time
 }
 
 func streamChatResponse(w http.ResponseWriter, reader io.Reader, requestID, fallbackModel string, includeUsage bool, started time.Time) (int, tokenUsage, requestTelemetry, string) {
@@ -495,14 +494,9 @@ func translateChatEvent(w io.Writer, flusher http.Flusher, payload []byte, state
 		if err := ensureRole(); err != nil {
 			return err
 		}
-		state.reasoningOpen = true
 		return send(map[string]any{"reasoning_content": event.Delta}, nil, nil)
 	case "response.reasoning_summary_text.done", "response.reasoning_text.done":
-		if !state.reasoningOpen {
-			return nil
-		}
-		state.reasoningOpen = false
-		return send(map[string]any{"reasoning_content": "\n\n"}, nil, nil)
+		return nil
 	case "response.output_text.delta":
 		if event.Delta != "" && state.telemetry.FirstOutputMS == 0 {
 			state.telemetry.FirstOutputMS = elapsedMS(state.started)
