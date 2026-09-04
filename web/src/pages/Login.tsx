@@ -1,11 +1,12 @@
 import { FormEvent, useState } from 'react'
-import { ArrowRight, Check, KeyRound, LoaderCircle, LockKeyhole, Radio, ShieldCheck } from 'lucide-react'
+import { ArrowRight, Check, Eye, EyeOff, KeyRound, LoaderCircle, LockKeyhole, Radio, ShieldCheck } from 'lucide-react'
 import { api } from '../api'
 
 export function Login({ onSuccess }: { onSuccess: () => void }) {
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const [showPassword, setShowPassword] = useState(false)
 
   const submit = async (event: FormEvent) => {
     event.preventDefault()
@@ -49,7 +50,13 @@ export function Login({ onSuccess }: { onSuccess: () => void }) {
           </div>
           <form onSubmit={submit}>
             <label htmlFor="password">管理员密码</label>
-            <div className="input-with-icon"><LockKeyhole size={18} /><input id="password" autoFocus autoComplete="current-password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="输入密码" /></div>
+            <div className="input-with-icon">
+              <LockKeyhole size={18} />
+              <input id="password" autoFocus autoComplete="current-password" type={showPassword ? 'text' : 'password'} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="输入密码" />
+              <button className="password-toggle" type="button" aria-label={showPassword ? '隐藏密码' : '显示密码'} aria-pressed={showPassword} onClick={() => setShowPassword((value) => !value)}>
+                {showPassword ? <EyeOff size={17} /> : <Eye size={17} />}
+              </button>
+            </div>
             {error && <div className="form-error" role="alert">{error}</div>}
             <button className="primary-button full login-submit" type="submit" disabled={loading || !password}>
               {loading ? <LoaderCircle className="spin" size={17} /> : <KeyRound size={17} />}

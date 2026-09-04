@@ -277,6 +277,8 @@ td code { color: #475650; font-size: 10px; }
 .input-with-icon:focus-within { color: #328166; background: #fff; border-color: #4c9b80; box-shadow: 0 0 0 4px #e7f4ef; }
 .input-with-icon input { min-width: 0; flex: 1; color: #293630; background: transparent; border: 0; outline: 0; font-size: 13px; }
 .input-with-icon input::placeholder { color: #a2aca8; }
+.password-toggle { width: 31px; height: 31px; display: grid; place-items: center; flex: 0 0 auto; padding: 0; color: #87938e; background: transparent; border: 0; border-radius: 8px; cursor: pointer; }
+.password-toggle:hover { color: #2f6f5a; background: #edf5f1; }
 .login-submit { min-height: 48px; margin-top: 5px; padding: 0 16px; }
 .login-submit span { flex: 1; }
 .login-help { display: flex; align-items: flex-start; gap: 8px; margin-top: 22px; padding-top: 19px; color: #88948f; border-top: 1px solid #e7ecea; font-size: 9px; line-height: 1.55; }
@@ -354,8 +356,8 @@ td code { color: #475650; font-size: 10px; }
 @media (max-width: 520px) {
   .login-page { padding: 0; background: #fff; }
   .login-page::before, .login-glow { display: none; }
-  .login-shell { min-height: 100vh; border: 0; border-radius: 0; box-shadow: none; }
-  .login-story { min-height: 220px; padding: 26px 24px; border-radius: 0 0 24px 24px; }
+  .login-shell { min-height: 100svh; grid-template-rows: auto 1fr; border: 0; border-radius: 0; box-shadow: none; }
+  .login-story { min-height: 0; padding: 26px 24px 25px; border-radius: 0 0 24px 24px; }
   .login-story-copy { margin-top: 35px; }
   .login-story-copy h1 { margin: 11px 0 12px; font-size: 30px; }
   .login-story-copy p { font-size: 10px; }
