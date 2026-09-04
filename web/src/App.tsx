@@ -44,7 +44,11 @@ export default function App() {
   if (!session) return <div className="boot-screen"><div className="brand-mark large"><img src="/codexone-logo.svg" alt="CodexOne" /></div></div>
   if (!session.authenticated) return <><Login onSuccess={() => void checkSession()} />{toast && <div className="toast" role="status">{toast}</div>}</>
 
-  const navigate = (next: Page) => { window.location.hash = `/${next}`; setPage(next) }
+  const navigate = (next: Page) => {
+    window.location.hash = `/${next}`
+    setPage(next)
+    window.scrollTo({ top: 0, left: 0 })
+  }
   const logout = async () => {
     try {
       await api('/api/auth/logout', { method: 'POST' })
