@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNormalizeResponsesRequest(t *testing.T) {
@@ -51,6 +52,53 @@ func TestNormalizeResponsesRequest(t *testing.T) {
 	tool := body["tools"].([]any)[0].(map[string]any)
 	if tool["type"] != "web_search" {
 		t.Fatalf("tool type = %v, want web_search", tool["type"])
+	}
+}
+
+func TestNormalizeResponsesReasoningEffortCompatibility(t *testing.T) {
+	result, _, _, err := normalizeResponsesRequest([]byte(`{
+		"model":"gpt-5.6-sol",
+		"input":"hello",
+		"reasoning_effort":"maximum"
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err = json.Unmarshal(result, &body); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := body["reasoning_effort"]; exists {
+		t.Fatalf("flat reasoning_effort was forwarded: %s", result)
+	}
+	reasoning := body["reasoning"].(map[string]any)
+	if reasoning["effort"] != "max" || reasoning["summary"] != "auto" {
+		t.Fatalf("reasoning = %#v", reasoning)
+	}
+	if got := reasoningEffortFromBody(result); got != "max" {
+		t.Fatalf("reasoningEffortFromBody() = %q, want max", got)
+	}
+}
+
+func TestNormalizeResponsesReasoningAliases(t *testing.T) {
+	result, _, _, err := normalizeResponsesRequest([]byte(`{
+		"model":"gpt-5.6-luna",
+		"input":"hello",
+		"reasoning":{"effort":"x-high","generate_summary":"detailed"}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err = json.Unmarshal(result, &body); err != nil {
+		t.Fatal(err)
+	}
+	reasoning := body["reasoning"].(map[string]any)
+	if reasoning["effort"] != "xhigh" || reasoning["summary"] != "detailed" {
+		t.Fatalf("reasoning = %#v", reasoning)
+	}
+	if _, exists := reasoning["generate_summary"]; exists {
+		t.Fatalf("legacy generate_summary was forwarded: %#v", reasoning)
 	}
 }
 
@@ -152,13 +200,13 @@ func TestConvertChatResponse(t *testing.T) {
 
 func TestTranslateChatEventPreservesReasoningAndUsage(t *testing.T) {
 	recorder := httptest.NewRecorder()
-	state := &chatStreamState{model: "gpt-test", created: 100, tools: make(map[int]int)}
+	state := &chatStreamState{model: "gpt-test", created: 100, tools: make(map[int]int), started: time.Now().Add(-time.Second)}
 	events := []string{
 		`{"type":"response.created","response":{"id":"resp_1","model":"gpt-test","created_at":100}}`,
 		`{"type":"response.reasoning_summary_text.delta","delta":"check inputs"}`,
 		`{"type":"response.reasoning_summary_text.done"}`,
 		`{"type":"response.output_text.delta","delta":"done"}`,
-		`{"type":"response.completed","response":{"id":"resp_1","model":"gpt-test","usage":{"input_tokens":10,"output_tokens":4,"output_tokens_details":{"reasoning_tokens":3}}}}`,
+		`{"type":"response.completed","response":{"id":"resp_1","model":"gpt-test","reasoning":{"effort":"max"},"usage":{"input_tokens":10,"output_tokens":4,"output_tokens_details":{"reasoning_tokens":3}}}}`,
 	}
 	for _, event := range events {
 		if err := translateChatEvent(recorder, recorder, []byte(event), state, true); err != nil {
@@ -173,6 +221,9 @@ func TestTranslateChatEventPreservesReasoningAndUsage(t *testing.T) {
 	}
 	if !state.usage.HasReasoningTokens || state.usage.ReasoningTokens != 3 {
 		t.Fatalf("stream usage = %#v", state.usage)
+	}
+	if state.usage.EffectiveReasoningEffort != "max" || state.telemetry.FirstReasoningMS == 0 || state.telemetry.FirstOutputMS == 0 {
+		t.Fatalf("stream telemetry = usage:%#v telemetry:%#v", state.usage, state.telemetry)
 	}
 }
 

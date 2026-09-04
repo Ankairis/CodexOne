@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 func normalizeResponsesRequest(raw []byte) ([]byte, bool, string, error) {
@@ -39,6 +40,7 @@ func normalizeResponsesRequest(raw []byte) ([]byte, bool, string, error) {
 	body["store"] = false
 	body["parallel_tool_calls"] = true
 	body["include"] = []string{"reasoning.encrypted_content"}
+	normalizeReasoningConfig(body)
 
 	for _, field := range []string{
 		"max_output_tokens", "max_completion_tokens", "temperature", "top_p", "truncation",
@@ -61,6 +63,70 @@ func normalizeResponsesRequest(raw []byte) ([]byte, bool, string, error) {
 		return nil, false, "", fmt.Errorf("encode Responses request: %w", err)
 	}
 	return encoded, requestedStream, model, nil
+}
+
+func normalizeReasoningConfig(body map[string]any) {
+	reasoning, _ := body["reasoning"].(map[string]any)
+	flatEffort, _ := body["reasoning_effort"].(string)
+	delete(body, "reasoning_effort")
+
+	if reasoning == nil && strings.TrimSpace(flatEffort) != "" {
+		reasoning = make(map[string]any)
+		body["reasoning"] = reasoning
+	}
+	if reasoning == nil {
+		return
+	}
+	effort, _ := reasoning["effort"].(string)
+	if strings.TrimSpace(effort) == "" {
+		effort = flatEffort
+	}
+	effort = canonicalReasoningEffort(effort)
+	if effort == "auto" {
+		effort = "medium"
+	}
+	if effort != "" {
+		reasoning["effort"] = effort
+	}
+	if _, exists := reasoning["summary"]; !exists {
+		if legacy, ok := reasoning["generate_summary"].(string); ok && strings.TrimSpace(legacy) != "" {
+			reasoning["summary"] = strings.ToLower(strings.TrimSpace(legacy))
+		} else if effort != "" && effort != "none" {
+			reasoning["summary"] = "auto"
+		}
+	}
+	delete(reasoning, "generate_summary")
+}
+
+func canonicalReasoningEffort(value string) string {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	compact := strings.NewReplacer("-", "", "_", "", " ", "").Replace(normalized)
+	switch compact {
+	case "off", "disabled":
+		return "none"
+	case "xhigh", "extrahigh":
+		return "xhigh"
+	case "maximum":
+		return "max"
+	default:
+		return normalized
+	}
+}
+
+func reasoningEffortFromBody(raw []byte) string {
+	var body struct {
+		ReasoningEffort string `json:"reasoning_effort"`
+		Reasoning       struct {
+			Effort string `json:"effort"`
+		} `json:"reasoning"`
+	}
+	if json.Unmarshal(raw, &body) != nil {
+		return ""
+	}
+	if effort := canonicalReasoningEffort(body.Reasoning.Effort); effort != "" {
+		return effort
+	}
+	return canonicalReasoningEffort(body.ReasoningEffort)
 }
 
 func normalizeInput(value any) {

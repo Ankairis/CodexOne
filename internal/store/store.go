@@ -77,6 +77,9 @@ func (s *Store) migrate(ctx context.Context) error {
 			id TEXT PRIMARY KEY, request_id TEXT NOT NULL, api_key_id TEXT, method TEXT NOT NULL, path TEXT NOT NULL,
 			model TEXT NOT NULL DEFAULT '', status INTEGER NOT NULL, duration_ms BIGINT NOT NULL,
 			input_tokens BIGINT NOT NULL DEFAULT 0, output_tokens BIGINT NOT NULL DEFAULT 0,
+			reasoning_tokens BIGINT NOT NULL DEFAULT 0, reasoning_effort TEXT NOT NULL DEFAULT '',
+			upstream_reasoning_effort TEXT NOT NULL DEFAULT '', first_reasoning_ms BIGINT NOT NULL DEFAULT 0,
+			first_output_ms BIGINT NOT NULL DEFAULT 0,
 			error TEXT NOT NULL DEFAULT '', created_at BIGINT NOT NULL,
 			FOREIGN KEY (api_key_id) REFERENCES api_keys(id) ON DELETE SET NULL
 		)`,
@@ -96,6 +99,61 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	if err = tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
+	}
+	return s.ensureRequestLogTelemetryColumns(ctx)
+}
+
+func (s *Store) ensureRequestLogTelemetryColumns(ctx context.Context) error {
+	columns := []struct {
+		name       string
+		definition string
+	}{
+		{"reasoning_tokens", "BIGINT NOT NULL DEFAULT 0"},
+		{"reasoning_effort", "TEXT NOT NULL DEFAULT ''"},
+		{"upstream_reasoning_effort", "TEXT NOT NULL DEFAULT ''"},
+		{"first_reasoning_ms", "BIGINT NOT NULL DEFAULT 0"},
+		{"first_output_ms", "BIGINT NOT NULL DEFAULT 0"},
+	}
+	if s.postgres {
+		for _, column := range columns {
+			statement := fmt.Sprintf("ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS %s %s", column.name, column.definition)
+			if _, err := s.db.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("add request telemetry column %s: %w", column.name, err)
+			}
+		}
+		return nil
+	}
+
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(request_logs)`)
+	if err != nil {
+		return fmt.Errorf("inspect request log columns: %w", err)
+	}
+	existing := make(map[string]bool)
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, kind string
+		var defaultValue sql.NullString
+		if err = rows.Scan(&cid, &name, &kind, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan request log column: %w", err)
+		}
+		existing[name] = true
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("read request log columns: %w", err)
+	}
+	if err = rows.Close(); err != nil {
+		return fmt.Errorf("close request log column scan: %w", err)
+	}
+	for _, column := range columns {
+		if existing[column.name] {
+			continue
+		}
+		statement := fmt.Sprintf("ALTER TABLE request_logs ADD COLUMN %s %s", column.name, column.definition)
+		if _, err = s.db.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("add request telemetry column %s: %w", column.name, err)
+		}
 	}
 	return nil
 }
@@ -238,9 +296,11 @@ func (s *Store) RevokeAPIKey(ctx context.Context, id string) (bool, error) {
 
 func (s *Store) InsertRequestLog(ctx context.Context, entry RequestLog) error {
 	_, err := s.db.ExecContext(ctx, s.query(`INSERT INTO request_logs(
-		id, request_id, api_key_id, method, path, model, status, duration_ms, input_tokens, output_tokens, error, created_at
-	) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`), entry.ID, entry.RequestID, nullString(entry.APIKeyID), entry.Method,
-		entry.Path, entry.Model, entry.Status, entry.DurationMS, entry.InputTokens, entry.OutputTokens, entry.Error, entry.CreatedAt)
+		id, request_id, api_key_id, method, path, model, status, duration_ms, input_tokens, output_tokens,
+		reasoning_tokens, reasoning_effort, upstream_reasoning_effort, first_reasoning_ms, first_output_ms, error, created_at
+	) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`), entry.ID, entry.RequestID, nullString(entry.APIKeyID), entry.Method,
+		entry.Path, entry.Model, entry.Status, entry.DurationMS, entry.InputTokens, entry.OutputTokens, entry.ReasoningTokens,
+		entry.ReasoningEffort, entry.UpstreamReasoningEffort, entry.FirstReasoningMS, entry.FirstOutputMS, entry.Error, entry.CreatedAt)
 	return err
 }
 
@@ -249,9 +309,9 @@ func (s *Store) TodayStats(ctx context.Context, start, end int64) (TodayStats, e
 	var average sql.NullFloat64
 	err := s.db.QueryRowContext(ctx, s.query(`SELECT COUNT(*),
 		COALESCE(SUM(CASE WHEN status >= 200 AND status < 300 THEN 1 ELSE 0 END), 0), AVG(duration_ms),
-		COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0)
+		COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(reasoning_tokens), 0)
 		FROM request_logs WHERE created_at >= ? AND created_at < ?`), start, end).Scan(
-		&stats.Requests, &stats.Successes, &average, &stats.InputTokens, &stats.OutputTokens,
+		&stats.Requests, &stats.Successes, &average, &stats.InputTokens, &stats.OutputTokens, &stats.ReasoningTokens,
 	)
 	if err != nil {
 		return stats, err
@@ -267,7 +327,8 @@ func (s *Store) TodayStats(ctx context.Context, start, end int64) (TodayStats, e
 
 func (s *Store) ListRequestLogs(ctx context.Context, start, end int64, limit int) ([]RequestLog, error) {
 	rows, err := s.db.QueryContext(ctx, s.query(`SELECT l.id, l.request_id, COALESCE(l.api_key_id, ''), COALESCE(k.name, ''),
-		l.method, l.path, l.model, l.status, l.duration_ms, l.input_tokens, l.output_tokens, l.error, l.created_at
+		l.method, l.path, l.model, l.status, l.duration_ms, l.input_tokens, l.output_tokens, l.reasoning_tokens,
+		l.reasoning_effort, l.upstream_reasoning_effort, l.first_reasoning_ms, l.first_output_ms, l.error, l.created_at
 		FROM request_logs l LEFT JOIN api_keys k ON l.api_key_id = k.id
 		WHERE l.created_at >= ? AND l.created_at < ? ORDER BY l.created_at DESC LIMIT ?`), start, end, limit)
 	if err != nil {
@@ -278,7 +339,9 @@ func (s *Store) ListRequestLogs(ctx context.Context, start, end int64, limit int
 	for rows.Next() {
 		var entry RequestLog
 		if err = rows.Scan(&entry.ID, &entry.RequestID, &entry.APIKeyID, &entry.APIKeyName, &entry.Method, &entry.Path,
-			&entry.Model, &entry.Status, &entry.DurationMS, &entry.InputTokens, &entry.OutputTokens, &entry.Error, &entry.CreatedAt); err != nil {
+			&entry.Model, &entry.Status, &entry.DurationMS, &entry.InputTokens, &entry.OutputTokens, &entry.ReasoningTokens,
+			&entry.ReasoningEffort, &entry.UpstreamReasoningEffort, &entry.FirstReasoningMS, &entry.FirstOutputMS,
+			&entry.Error, &entry.CreatedAt); err != nil {
 			return nil, err
 		}
 		entries = append(entries, entry)

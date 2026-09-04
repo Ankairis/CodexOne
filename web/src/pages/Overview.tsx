@@ -58,15 +58,15 @@ export function Overview({ notify }: { notify: (message: string) => void }) {
         <Metric icon={Activity} label="请求数" value={formatNumber(stats?.requests ?? 0)} hint={data?.account_connected ? '账号已连接' : '账号未连接'} />
         <Metric icon={CheckCircle2} label="成功率" value={`${(stats?.success_rate ?? 0).toFixed(1)}%`} hint={`${formatNumber(stats?.successes ?? 0)} 次成功`} tone="green" />
         <Metric icon={Clock3} label="平均延迟" value={`${Math.round(stats?.average_ms ?? 0)} ms`} hint="端到端耗时" tone="amber" />
-        <Metric icon={Zap} label="Token" value={formatNumber(totalTokens)} hint={`${formatNumber(stats?.input_tokens ?? 0)} 输入 / ${formatNumber(stats?.output_tokens ?? 0)} 输出`} tone="violet" />
+        <Metric icon={Zap} label="Token" value={formatNumber(totalTokens)} hint={`${formatNumber(stats?.input_tokens ?? 0)} 输入 / ${formatNumber(stats?.output_tokens ?? 0)} 输出 · ${formatNumber(stats?.reasoning_tokens ?? 0)} 推理`} tone="violet" />
       </section>
       <section className="panel request-panel">
         <div className="panel-header"><div><h2>请求详情</h2><span>{data?.requests.length ?? 0} 条记录</span></div>{data && <button className="quiet-button" type="button" onClick={async () => { await copyText(data.base_url); notify('Base URL 已复制') }}><Copy size={15} />复制 Base URL</button>}</div>
         <div className="table-scroll">
           <table>
-            <thead><tr><th>时间</th><th>状态</th><th>模型</th><th>API Key</th><th>延迟</th><th>Token</th><th>Request ID</th></tr></thead>
+            <thead><tr><th>时间</th><th>状态</th><th>模型</th><th>API Key</th><th>延迟</th><th>推理</th><th>Token</th><th>Request ID</th></tr></thead>
             <tbody>
-              {!loading && !data?.requests.length && <tr><td className="empty-cell" colSpan={7}>这一天还没有请求</td></tr>}
+              {!loading && !data?.requests.length && <tr><td className="empty-cell" colSpan={8}>这一天还没有请求</td></tr>}
               {data?.requests.map((entry) => (
                 <tr key={entry.id} className={selected?.id === entry.id ? 'selected-row' : ''} onClick={() => setSelected(entry)}>
                   <td>{formatTime(entry.created_at)}</td>
@@ -74,6 +74,7 @@ export function Overview({ notify }: { notify: (message: string) => void }) {
                   <td><code className="model-name">{entry.model || '—'}</code></td>
                   <td>{entry.api_key_name || '—'}</td>
                   <td>{entry.duration_ms} ms</td>
+                  <td><code>{reasoningLabel(entry)}</code>{entry.reasoning_tokens > 0 ? ` · ${formatNumber(entry.reasoning_tokens)}` : ''}</td>
                   <td>{formatNumber(entry.input_tokens + entry.output_tokens)}</td>
                   <td><code className="request-id">{entry.request_id}</code></td>
                 </tr>
@@ -81,7 +82,7 @@ export function Overview({ notify }: { notify: (message: string) => void }) {
             </tbody>
           </table>
         </div>
-        {selected && <div className="request-detail"><div><span>路径</span><code>{selected.method} {selected.path}</code></div><div><span>输入 / 输出</span><strong>{formatNumber(selected.input_tokens)} / {formatNumber(selected.output_tokens)}</strong></div><div><span>完整 Request ID</span><code>{selected.request_id}</code></div>{selected.error && <div className="detail-error"><span>错误</span><code>{selected.error}</code></div>}</div>}
+        {selected && <div className="request-detail"><div><span>路径</span><code>{selected.method} {selected.path}</code></div><div><span>输入 / 输出 / 推理</span><strong>{formatNumber(selected.input_tokens)} / {formatNumber(selected.output_tokens)} / {formatNumber(selected.reasoning_tokens)}</strong></div><div><span>请求 / 上游强度</span><code>{selected.reasoning_effort || '默认'} / {selected.upstream_reasoning_effort || '未回显'}</code></div><div><span>首个思考 / 正文</span><strong>{formatLatency(selected.first_reasoning_ms)} / {formatLatency(selected.first_output_ms)}</strong></div><div><span>完整 Request ID</span><code>{selected.request_id}</code></div>{selected.error && <div className="detail-error"><span>错误</span><code>{selected.error}</code></div>}</div>}
       </section>
       <section className="panel log-panel">
         <div className="panel-header"><div><h2><TerminalSquare size={17} />运行日志</h2><span>只显示最近 300 条，不记录请求正文</span></div><span className="live-indicator"><i />LIVE</span></div>
@@ -102,3 +103,10 @@ function Status({ status }: { status: number }) {
 
 function formatNumber(value: number) { return new Intl.NumberFormat('zh-CN', { notation: value >= 10000 ? 'compact' : 'standard', maximumFractionDigits: 1 }).format(value) }
 function formatTime(value: number) { return new Date(value).toLocaleTimeString('zh-CN', { hour12: false }) }
+function formatLatency(value?: number) { return value && value > 0 ? `${value} ms` : '—' }
+function reasoningLabel(entry: RequestEntry) {
+  const requested = entry.reasoning_effort || '默认'
+  return entry.upstream_reasoning_effort && entry.upstream_reasoning_effort !== requested
+    ? `${requested} → ${entry.upstream_reasoning_effort}`
+    : entry.upstream_reasoning_effort || requested
+}

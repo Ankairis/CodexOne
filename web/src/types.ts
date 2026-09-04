@@ -12,6 +12,7 @@ export type TodayStats = {
   average_ms: number
   input_tokens: number
   output_tokens: number
+  reasoning_tokens: number
 }
 
 export type RequestEntry = {
@@ -26,6 +27,11 @@ export type RequestEntry = {
   duration_ms: number
   input_tokens: number
   output_tokens: number
+  reasoning_tokens: number
+  reasoning_effort?: string
+  upstream_reasoning_effort?: string
+  first_reasoning_ms?: number
+  first_output_ms?: number
   error?: string
   created_at: number
 }

@@ -18,7 +18,8 @@ func (s *Service) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	status := http.StatusOK
 	errText, model := "", ""
 	var inputTokens, outputTokens int64
-	defer func() { s.record(r, requestID, model, status, started, inputTokens, outputTokens, errText) }()
+	telemetry := requestTelemetry{}
+	defer func() { s.record(r, requestID, model, status, started, inputTokens, outputTokens, telemetry, errText) }()
 
 	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, s.cfg.MaxRequestBytes))
 	if err != nil {
@@ -33,6 +34,7 @@ func (s *Service) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, "invalid_request", errText, requestID)
 		return
 	}
+	telemetry.ReasoningEffort = reasoningEffortFromBody(body)
 	credential, err := s.auth.FreshCredential(r.Context())
 	if err != nil {
 		status, errText = http.StatusServiceUnavailable, err.Error()
@@ -63,7 +65,11 @@ func (s *Service) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if stream {
-		status, inputTokens, outputTokens, errText = streamChatResponse(w, resp.Body, requestID, model, includeUsage)
+		var usage tokenUsage
+		var observed requestTelemetry
+		status, usage, observed, errText = streamChatResponse(w, resp.Body, requestID, model, includeUsage, started)
+		inputTokens, outputTokens = usage.InputTokens, usage.OutputTokens
+		telemetry.mergeResponse(observed, usage)
 		return
 	}
 	final, usage, err := collectResponse(resp.Body)
@@ -73,6 +79,7 @@ func (s *Service) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	inputTokens, outputTokens = usage.InputTokens, usage.OutputTokens
+	telemetry.mergeResponse(requestTelemetry{FirstOutputMS: elapsedMS(started)}, usage)
 	converted, err := convertChatResponse(final)
 	if err != nil {
 		status, errText = http.StatusBadGateway, err.Error()
@@ -185,11 +192,11 @@ func convertChatRequest(raw []byte) ([]byte, bool, bool, string, error) {
 	if request.ParallelToolCalls != nil {
 		responses["parallel_tool_calls"] = *request.ParallelToolCalls
 	}
-	reasoningEffort := strings.TrimSpace(request.ReasoningEffort)
+	reasoningEffort := canonicalReasoningEffort(request.ReasoningEffort)
 	if reasoningEffort == "" {
-		reasoningEffort = strings.TrimSpace(request.Reasoning.Effort)
+		reasoningEffort = canonicalReasoningEffort(request.Reasoning.Effort)
 	}
-	if reasoningEffort == "" {
+	if reasoningEffort == "" || reasoningEffort == "auto" {
 		reasoningEffort = "medium"
 	}
 	reasoning := map[string]any{"effort": reasoningEffort}
@@ -374,26 +381,28 @@ type chatStreamState struct {
 	tools         map[int]int
 	nextTool      int
 	usage         tokenUsage
+	telemetry     requestTelemetry
+	started       time.Time
 }
 
-func streamChatResponse(w http.ResponseWriter, reader io.Reader, requestID, fallbackModel string, includeUsage bool) (int, int64, int64, string) {
+func streamChatResponse(w http.ResponseWriter, reader io.Reader, requestID, fallbackModel string, includeUsage bool, started time.Time) (int, tokenUsage, requestTelemetry, string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming_unsupported", "server does not support streaming", requestID)
-		return http.StatusInternalServerError, 0, 0, "streaming unsupported"
+		return http.StatusInternalServerError, tokenUsage{}, requestTelemetry{}, "streaming unsupported"
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.Header().Set("X-Request-Id", requestID)
 	w.WriteHeader(http.StatusOK)
-	state := &chatStreamState{model: fallbackModel, created: time.Now().Unix(), tools: make(map[int]int)}
+	state := &chatStreamState{model: fallbackModel, created: time.Now().Unix(), tools: make(map[int]int), started: started}
 	buffered := bufio.NewReader(reader)
 	for {
 		line, err := buffered.ReadBytes('\n')
 		if payload := ssePayload(line); len(payload) > 0 && !bytes.Equal(payload, []byte("[DONE]")) {
 			if writeErr := translateChatEvent(w, flusher, payload, state, includeUsage); writeErr != nil {
-				return 499, state.usage.InputTokens, state.usage.OutputTokens, "client disconnected"
+				return 499, state.usage, state.telemetry, "client disconnected"
 			}
 		}
 		if err != nil {
@@ -401,9 +410,9 @@ func streamChatResponse(w http.ResponseWriter, reader io.Reader, requestID, fall
 				if !state.terminalSent {
 					_ = writeChatDone(w, flusher)
 				}
-				return http.StatusOK, state.usage.InputTokens, state.usage.OutputTokens, ""
+				return http.StatusOK, state.usage, state.telemetry, ""
 			}
-			return http.StatusBadGateway, state.usage.InputTokens, state.usage.OutputTokens, err.Error()
+			return http.StatusBadGateway, state.usage, state.telemetry, err.Error()
 		}
 	}
 }
@@ -466,6 +475,9 @@ func translateChatEvent(w io.Writer, flusher http.Flusher, payload []byte, state
 		if event.Delta == "" {
 			return nil
 		}
+		if state.telemetry.FirstReasoningMS == 0 {
+			state.telemetry.FirstReasoningMS = elapsedMS(state.started)
+		}
 		if err := ensureRole(); err != nil {
 			return err
 		}
@@ -478,6 +490,9 @@ func translateChatEvent(w io.Writer, flusher http.Flusher, payload []byte, state
 		state.reasoningOpen = false
 		return send(map[string]any{"reasoning_content": "\n\n"}, nil, nil)
 	case "response.output_text.delta":
+		if event.Delta != "" && state.telemetry.FirstOutputMS == 0 {
+			state.telemetry.FirstOutputMS = elapsedMS(state.started)
+		}
 		if err := ensureRole(); err != nil {
 			return err
 		}

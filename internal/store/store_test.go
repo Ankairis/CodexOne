@@ -2,12 +2,65 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/Ankairis/CodexOne/internal/config"
 )
+
+func TestOpenMigratesLegacyRequestTelemetryColumns(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	legacy, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = legacy.Exec(`CREATE TABLE request_logs (
+		id TEXT PRIMARY KEY, request_id TEXT NOT NULL, api_key_id TEXT, method TEXT NOT NULL, path TEXT NOT NULL,
+		model TEXT NOT NULL DEFAULT '', status INTEGER NOT NULL, duration_ms BIGINT NOT NULL,
+		input_tokens BIGINT NOT NULL DEFAULT 0, output_tokens BIGINT NOT NULL DEFAULT 0,
+		error TEXT NOT NULL DEFAULT '', created_at BIGINT NOT NULL
+	)`)
+	if closeErr := legacy.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	database, err := Open(ctx, config.Config{StorageDriver: "sqlite", SQLitePath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	rows, err := database.db.QueryContext(ctx, `PRAGMA table_info(request_logs)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	want := map[string]bool{
+		"reasoning_tokens": false, "reasoning_effort": false, "upstream_reasoning_effort": false,
+		"first_reasoning_ms": false, "first_output_ms": false,
+	}
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, kind string
+		var defaultValue sql.NullString
+		if err = rows.Scan(&cid, &name, &kind, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatal(err)
+		}
+		if _, exists := want[name]; exists {
+			want[name] = true
+		}
+	}
+	for column, found := range want {
+		if !found {
+			t.Errorf("legacy migration did not add %s", column)
+		}
+	}
+}
 
 func TestSaveAccountReplacesTheOnlyRow(t *testing.T) {
 	ctx := context.Background()
@@ -62,15 +115,23 @@ func TestAPIKeyLifecycleAndStats(t *testing.T) {
 	if _, err = database.FindActiveAPIKeyByHash(ctx, "hash"); err != nil {
 		t.Fatal(err)
 	}
-	if err = database.InsertRequestLog(ctx, RequestLog{ID: "log_one", RequestID: "req_one", APIKeyID: key.ID, Method: "POST", Path: "/v1/responses", Model: "gpt-test", Status: 200, DurationMS: 120, InputTokens: 10, OutputTokens: 5, CreatedAt: now}); err != nil {
+	if err = database.InsertRequestLog(ctx, RequestLog{ID: "log_one", RequestID: "req_one", APIKeyID: key.ID, Method: "POST", Path: "/v1/responses", Model: "gpt-test", Status: 200, DurationMS: 120, InputTokens: 10, OutputTokens: 5, ReasoningTokens: 3, ReasoningEffort: "max", UpstreamReasoningEffort: "max", FirstReasoningMS: 50, FirstOutputMS: 100, CreatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 	stats, err := database.TodayStats(ctx, now-1000, now+1000)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stats.Requests != 1 || stats.SuccessRate != 100 || stats.InputTokens != 10 || stats.OutputTokens != 5 {
+	if stats.Requests != 1 || stats.SuccessRate != 100 || stats.InputTokens != 10 || stats.OutputTokens != 5 || stats.ReasoningTokens != 3 {
 		t.Fatalf("stats = %#v", stats)
+	}
+	logs, err := database.ListRequestLogs(ctx, now-1000, now+1000, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 1 || logs[0].ReasoningEffort != "max" || logs[0].UpstreamReasoningEffort != "max" ||
+		logs[0].ReasoningTokens != 3 || logs[0].FirstReasoningMS != 50 || logs[0].FirstOutputMS != 100 {
+		t.Fatalf("request telemetry = %#v", logs)
 	}
 	if revoked, err := database.RevokeAPIKey(ctx, key.ID); err != nil || !revoked {
 		t.Fatalf("revoke = %v, %v", revoked, err)

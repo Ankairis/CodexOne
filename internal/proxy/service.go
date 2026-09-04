@@ -70,7 +70,7 @@ func (s *Service) Models(w http.ResponseWriter, r *http.Request) {
 	requestID := newID("req")
 	status := http.StatusOK
 	errText := ""
-	defer func() { s.record(r, requestID, "", status, started, 0, 0, errText) }()
+	defer func() { s.record(r, requestID, "", status, started, 0, 0, requestTelemetry{}, errText) }()
 
 	s.modelsMu.Lock()
 	if len(s.models) > 0 && time.Since(s.modelsAt) < 10*time.Minute {
@@ -134,7 +134,8 @@ func (s *Service) handleResponsesPath(w http.ResponseWriter, r *http.Request, up
 	status := http.StatusOK
 	errText, model := "", ""
 	var inputTokens, outputTokens int64
-	defer func() { s.record(r, requestID, model, status, started, inputTokens, outputTokens, errText) }()
+	telemetry := requestTelemetry{}
+	defer func() { s.record(r, requestID, model, status, started, inputTokens, outputTokens, telemetry, errText) }()
 
 	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, s.cfg.MaxRequestBytes))
 	if err != nil {
@@ -149,6 +150,7 @@ func (s *Service) handleResponsesPath(w http.ResponseWriter, r *http.Request, up
 		writeError(w, status, "invalid_request", errText, requestID)
 		return
 	}
+	telemetry.ReasoningEffort = reasoningEffortFromBody(body)
 	credential, err := s.auth.FreshCredential(r.Context())
 	if err != nil {
 		status, errText = http.StatusServiceUnavailable, err.Error()
@@ -181,7 +183,11 @@ func (s *Service) handleResponsesPath(w http.ResponseWriter, r *http.Request, up
 	}
 
 	if requestedStream {
-		status, inputTokens, outputTokens, errText = s.streamResponse(w, resp, requestID)
+		var usage tokenUsage
+		var observed requestTelemetry
+		status, usage, observed, errText = s.streamResponse(w, resp, requestID, started)
+		inputTokens, outputTokens = usage.InputTokens, usage.OutputTokens
+		telemetry.mergeResponse(observed, usage)
 		return
 	}
 	final, usage, err := collectResponse(resp.Body)
@@ -191,6 +197,7 @@ func (s *Service) handleResponsesPath(w http.ResponseWriter, r *http.Request, up
 		return
 	}
 	inputTokens, outputTokens = usage.InputTokens, usage.OutputTokens
+	telemetry.mergeResponse(requestTelemetry{FirstOutputMS: elapsedMS(started)}, usage)
 	writeJSONBytes(w, http.StatusOK, final, requestID)
 }
 
@@ -199,7 +206,7 @@ func (s *Service) handlePassthroughJSON(w http.ResponseWriter, r *http.Request, 
 	requestID := newID("req")
 	status := http.StatusOK
 	errText, model := "", ""
-	defer func() { s.record(r, requestID, model, status, started, 0, 0, errText) }()
+	defer func() { s.record(r, requestID, model, status, started, 0, 0, requestTelemetry{}, errText) }()
 
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, s.cfg.MaxRequestBytes))
 	if err != nil || !json.Valid(body) {
@@ -251,11 +258,11 @@ func (s *Service) handlePassthroughJSON(w http.ResponseWriter, r *http.Request, 
 	_, _ = w.Write(raw)
 }
 
-func (s *Service) streamResponse(w http.ResponseWriter, resp *http.Response, requestID string) (int, int64, int64, string) {
+func (s *Service) streamResponse(w http.ResponseWriter, resp *http.Response, requestID string, started time.Time) (int, tokenUsage, requestTelemetry, string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming_unsupported", "server does not support streaming", requestID)
-		return http.StatusInternalServerError, 0, 0, "streaming unsupported"
+		return http.StatusInternalServerError, tokenUsage{}, requestTelemetry{}, "streaming unsupported"
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -265,53 +272,110 @@ func (s *Service) streamResponse(w http.ResponseWriter, resp *http.Response, req
 
 	reader := bufio.NewReader(resp.Body)
 	usage := tokenUsage{}
+	telemetry := requestTelemetry{}
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
-			parseSSEUsage(line, &usage)
+			observeSSE(line, &usage, &telemetry, started)
 			if _, writeErr := w.Write(line); writeErr != nil {
-				return 499, usage.InputTokens, usage.OutputTokens, "client disconnected"
+				return 499, usage, telemetry, "client disconnected"
 			}
 			flusher.Flush()
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				return http.StatusOK, usage.InputTokens, usage.OutputTokens, ""
+				return http.StatusOK, usage, telemetry, ""
 			}
-			return http.StatusBadGateway, usage.InputTokens, usage.OutputTokens, err.Error()
+			return http.StatusBadGateway, usage, telemetry, err.Error()
 		}
 	}
 }
 
-func (s *Service) record(r *http.Request, requestID, model string, status int, started time.Time, inputTokens, outputTokens int64, errText string) {
+func (s *Service) record(r *http.Request, requestID, model string, status int, started time.Time, inputTokens, outputTokens int64, telemetry requestTelemetry, errText string) {
 	key, _ := APIKeyFromContext(r.Context())
 	entry := store.RequestLog{
-		ID:           newID("log"),
-		RequestID:    requestID,
-		APIKeyID:     key.ID,
-		Method:       r.Method,
-		Path:         r.URL.Path,
-		Model:        model,
-		Status:       status,
-		DurationMS:   time.Since(started).Milliseconds(),
-		InputTokens:  inputTokens,
-		OutputTokens: outputTokens,
-		Error:        trimText(errText, 500),
-		CreatedAt:    time.Now().UnixMilli(),
+		ID:                      newID("log"),
+		RequestID:               requestID,
+		APIKeyID:                key.ID,
+		Method:                  r.Method,
+		Path:                    r.URL.Path,
+		Model:                   model,
+		Status:                  status,
+		DurationMS:              time.Since(started).Milliseconds(),
+		InputTokens:             inputTokens,
+		OutputTokens:            outputTokens,
+		ReasoningTokens:         telemetry.ReasoningTokens,
+		ReasoningEffort:         telemetry.ReasoningEffort,
+		UpstreamReasoningEffort: telemetry.UpstreamReasoningEffort,
+		FirstReasoningMS:        telemetry.FirstReasoningMS,
+		FirstOutputMS:           telemetry.FirstOutputMS,
+		Error:                   trimText(errText, 500),
+		CreatedAt:               time.Now().UnixMilli(),
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	if err := s.store.InsertRequestLog(ctx, entry); err != nil {
 		s.logger.Error("save request log", "error", err, "request_id", requestID)
 	}
-	s.logger.Info("proxy request", "request_id", requestID, "path", r.URL.Path, "model", model, "status", status, "duration_ms", entry.DurationMS)
+	fields := []any{"request_id", requestID, "path", r.URL.Path, "model", model, "status", status, "duration_ms", entry.DurationMS}
+	if telemetry.ReasoningEffort != "" {
+		fields = append(fields, "reasoning_effort", telemetry.ReasoningEffort)
+	}
+	if telemetry.UpstreamReasoningEffort != "" {
+		fields = append(fields, "upstream_reasoning_effort", telemetry.UpstreamReasoningEffort)
+	}
+	if telemetry.ReasoningTokens > 0 {
+		fields = append(fields, "reasoning_tokens", telemetry.ReasoningTokens)
+	}
+	if telemetry.FirstReasoningMS > 0 {
+		fields = append(fields, "first_reasoning_ms", telemetry.FirstReasoningMS)
+	}
+	if telemetry.FirstOutputMS > 0 {
+		fields = append(fields, "first_output_ms", telemetry.FirstOutputMS)
+	}
+	s.logger.Info("proxy request", fields...)
+}
+
+type requestTelemetry struct {
+	ReasoningEffort         string
+	UpstreamReasoningEffort string
+	ReasoningTokens         int64
+	FirstReasoningMS        int64
+	FirstOutputMS           int64
+}
+
+func (t *requestTelemetry) mergeResponse(observed requestTelemetry, usage tokenUsage) {
+	if observed.FirstReasoningMS > 0 {
+		t.FirstReasoningMS = observed.FirstReasoningMS
+	}
+	if observed.FirstOutputMS > 0 {
+		t.FirstOutputMS = observed.FirstOutputMS
+	}
+	if usage.EffectiveReasoningEffort != "" {
+		t.UpstreamReasoningEffort = usage.EffectiveReasoningEffort
+	}
+	if usage.HasReasoningTokens {
+		t.ReasoningTokens = usage.ReasoningTokens
+	}
+}
+
+func elapsedMS(started time.Time) int64 {
+	if started.IsZero() {
+		return 0
+	}
+	value := time.Since(started).Milliseconds()
+	if value < 1 {
+		return 1
+	}
+	return value
 }
 
 type tokenUsage struct {
-	InputTokens        int64
-	OutputTokens       int64
-	ReasoningTokens    int64
-	HasReasoningTokens bool
+	InputTokens              int64
+	OutputTokens             int64
+	ReasoningTokens          int64
+	HasReasoningTokens       bool
+	EffectiveReasoningEffort string
 }
 
 func collectResponse(reader io.Reader) ([]byte, tokenUsage, error) {
@@ -358,16 +422,31 @@ func collectResponse(reader io.Reader) ([]byte, tokenUsage, error) {
 	return final, usage, nil
 }
 
-func parseSSEUsage(line []byte, usage *tokenUsage) {
+func observeSSE(line []byte, usage *tokenUsage, telemetry *requestTelemetry, started time.Time) {
 	payload := ssePayload(line)
 	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
 		return
 	}
 	var event struct {
+		Type     string          `json:"type"`
+		Delta    string          `json:"delta"`
 		Response json.RawMessage `json:"response"`
 	}
 	if json.Unmarshal(payload, &event) == nil {
 		parseResponseUsage(event.Response, usage)
+		if event.Delta == "" {
+			return
+		}
+		switch event.Type {
+		case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+			if telemetry.FirstReasoningMS == 0 {
+				telemetry.FirstReasoningMS = elapsedMS(started)
+			}
+		case "response.output_text.delta":
+			if telemetry.FirstOutputMS == 0 {
+				telemetry.FirstOutputMS = elapsedMS(started)
+			}
+		}
 	}
 }
 
@@ -376,6 +455,9 @@ func parseResponseUsage(response json.RawMessage, usage *tokenUsage) {
 		return
 	}
 	var payload struct {
+		Reasoning struct {
+			Effort string `json:"effort"`
+		} `json:"reasoning"`
 		Usage struct {
 			InputTokens        int64 `json:"input_tokens"`
 			OutputTokens       int64 `json:"output_tokens"`
@@ -385,6 +467,9 @@ func parseResponseUsage(response json.RawMessage, usage *tokenUsage) {
 		} `json:"usage"`
 	}
 	if json.Unmarshal(response, &payload) == nil {
+		if payload.Reasoning.Effort != "" {
+			usage.EffectiveReasoningEffort = canonicalReasoningEffort(payload.Reasoning.Effort)
+		}
 		if payload.Usage.InputTokens > 0 {
 			usage.InputTokens = payload.Usage.InputTokens
 		}

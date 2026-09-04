@@ -53,7 +53,7 @@ func TestV1ResponsesUsesAPIKeyAndFixedCodexIdentity(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("X-Codex-Primary-Used-Percent", "12")
-		_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-test\",\"output\":[],\"usage\":{\"input_tokens\":3,\"output_tokens\":2,\"total_tokens\":5}}}\n\n")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-test\",\"reasoning\":{\"effort\":\"max\"},\"output\":[],\"usage\":{\"input_tokens\":3,\"output_tokens\":2,\"total_tokens\":5,\"output_tokens_details\":{\"reasoning_tokens\":1}}}}\n\n")
 	}))
 	defer upstream.Close()
 
@@ -66,7 +66,7 @@ func TestV1ResponsesUsesAPIKeyAndFixedCodexIdentity(t *testing.T) {
 		t.Fatalf("unauthorized status = %d", unauthorized.Code)
 	}
 
-	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"hello","stream":false,"store":true}`))
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"hello","stream":false,"store":true,"reasoning_effort":"max"}`))
 	request.Header.Set("Authorization", "Bearer "+apiKey)
 	request.Header.Set("User-Agent", "downstream-client/9.9")
 	request.Header.Set("Originator", "untrusted-client")
@@ -90,6 +90,10 @@ func TestV1ResponsesUsesAPIKeyAndFixedCodexIdentity(t *testing.T) {
 	if upstreamBody["stream"] != true || upstreamBody["store"] != false {
 		t.Fatalf("upstream body was not normalized: %#v", upstreamBody)
 	}
+	reasoning, _ := upstreamBody["reasoning"].(map[string]any)
+	if reasoning["effort"] != "max" || reasoning["summary"] != "auto" {
+		t.Fatalf("upstream reasoning = %#v", reasoning)
+	}
 	include, _ := upstreamBody["include"].([]any)
 	if len(include) != 1 || include[0] != "reasoning.encrypted_content" {
 		t.Fatalf("upstream include = %#v", upstreamBody["include"])
@@ -100,7 +104,8 @@ func TestV1ResponsesUsesAPIKeyAndFixedCodexIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(logs) != 1 || logs[0].InputTokens != 3 || logs[0].OutputTokens != 2 || logs[0].APIKeyID == "" {
+	if len(logs) != 1 || logs[0].InputTokens != 3 || logs[0].OutputTokens != 2 || logs[0].APIKeyID == "" ||
+		logs[0].ReasoningEffort != "max" || logs[0].UpstreamReasoningEffort != "max" || logs[0].ReasoningTokens != 1 || logs[0].FirstOutputMS == 0 {
 		t.Fatalf("request logs = %#v", logs)
 	}
 }
