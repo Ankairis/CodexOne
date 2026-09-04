@@ -1,9 +1,12 @@
 package web
 
 import (
+	"context"
 	"crypto/subtle"
+	"errors"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
@@ -11,6 +14,8 @@ import (
 
 	"github.com/Ankairis/CodexOne/internal/proxy"
 	"github.com/Ankairis/CodexOne/internal/security"
+	"github.com/Ankairis/CodexOne/internal/session"
+	"github.com/Ankairis/CodexOne/internal/store"
 )
 
 const sessionCookie = "codexone_session"
@@ -50,8 +55,13 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "sign in required")
 			return
 		}
-		value, err := s.sessions.Get(r.Context(), "admin:"+security.HashSecret(cookie.Value))
-		if err != nil || subtle.ConstantTimeCompare([]byte(value), []byte("authenticated")) != 1 {
+		authenticated, err := s.adminSessionAuthenticated(r.Context(), cookie.Value)
+		if err != nil {
+			s.logger.Error("admin session validation failed", "error", err)
+			writeError(w, http.StatusServiceUnavailable, "authentication_unavailable", "authentication storage is unavailable")
+			return
+		}
+		if !authenticated {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "session expired")
 			return
 		}
@@ -96,7 +106,12 @@ func (s *Server) requireAPIKey(next http.Handler) http.Handler {
 		}
 		key, err := s.database.FindActiveAPIKeyByHash(r.Context(), security.HashSecret(provided))
 		if err != nil {
-			writeError(w, http.StatusUnauthorized, "invalid_api_key", "API key is invalid or revoked")
+			if store.IsNotFound(err) {
+				writeError(w, http.StatusUnauthorized, "invalid_api_key", "API key is invalid or revoked")
+				return
+			}
+			s.logger.Error("API key lookup failed", "error", err)
+			writeError(w, http.StatusServiceUnavailable, "database_unavailable", "API key storage is unavailable")
 			return
 		}
 		_ = s.database.TouchAPIKey(r.Context(), key.ID, time.Now().UnixMilli())
@@ -104,12 +119,72 @@ func (s *Server) requireAPIKey(next http.Handler) http.Handler {
 	})
 }
 
-func clientAddress(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err == nil {
-		return host
+func adminSessionValue(passwordHash string) string {
+	return "authenticated:" + security.HashSecret(passwordHash)
+}
+
+func (s *Server) adminSessionAuthenticated(ctx context.Context, token string) (bool, error) {
+	value, err := s.sessions.Get(ctx, "admin:"+security.HashSecret(token))
+	if errors.Is(err, session.ErrNotFound) {
+		return false, nil
 	}
-	return r.RemoteAddr
+	if err != nil {
+		return false, err
+	}
+	passwordHash, err := s.database.GetSetting(ctx, adminPasswordSetting)
+	if store.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return subtle.ConstantTimeCompare([]byte(value), []byte(adminSessionValue(passwordHash))) == 1, nil
+}
+
+func (s *Server) clientAddress(r *http.Request) string {
+	peer, ok := parseRemoteAddress(r.RemoteAddr)
+	if !ok {
+		return r.RemoteAddr
+	}
+	if !s.isTrustedProxy(peer) {
+		return peer.String()
+	}
+
+	candidate := peer
+	forwarded := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
+	for index := len(forwarded) - 1; index >= 0; index-- {
+		address, err := netip.ParseAddr(strings.TrimSpace(forwarded[index]))
+		if err != nil {
+			return peer.String()
+		}
+		address = address.Unmap().WithZone("")
+		candidate = address
+		if !s.isTrustedProxy(address) {
+			return address.String()
+		}
+	}
+	return candidate.String()
+}
+
+func (s *Server) isTrustedProxy(address netip.Addr) bool {
+	for _, prefix := range s.cfg.TrustedProxyCIDRs {
+		if prefix.Contains(address) {
+			return true
+		}
+	}
+	return false
+}
+
+func parseRemoteAddress(remoteAddress string) (netip.Addr, bool) {
+	host, _, err := net.SplitHostPort(remoteAddress)
+	if err != nil {
+		host = strings.Trim(remoteAddress, "[]")
+	}
+	address, err := netip.ParseAddr(host)
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	return address.Unmap().WithZone(""), true
 }
 
 type loginAttempt struct {

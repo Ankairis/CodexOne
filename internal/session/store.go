@@ -47,8 +47,14 @@ type memoryStore struct {
 }
 
 func (s *memoryStore) Put(_ context.Context, key, value string, ttl time.Duration) error {
+	now := time.Now()
 	s.mu.Lock()
-	s.items[key] = memoryItem{value: value, expiresAt: time.Now().Add(ttl)}
+	for itemKey, item := range s.items {
+		if !item.expiresAt.After(now) {
+			delete(s.items, itemKey)
+		}
+	}
+	s.items[key] = memoryItem{value: value, expiresAt: now.Add(ttl)}
 	s.mu.Unlock()
 	return nil
 }

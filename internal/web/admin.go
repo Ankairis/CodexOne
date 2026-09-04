@@ -44,19 +44,25 @@ func EnsureAdminPassword(ctx context.Context, database *store.Store, configured 
 func (s *Server) authSession(w http.ResponseWriter, r *http.Request) {
 	authenticated := false
 	if cookie, err := r.Cookie(sessionCookie); err == nil && cookie.Value != "" {
-		value, getErr := s.sessions.Get(r.Context(), "admin:"+security.HashSecret(cookie.Value))
-		authenticated = getErr == nil && value == "authenticated"
+		var authErr error
+		authenticated, authErr = s.adminSessionAuthenticated(r.Context(), cookie.Value)
+		if authErr != nil {
+			s.logger.Error("admin session validation failed", "error", authErr)
+			writeError(w, http.StatusServiceUnavailable, "authentication_unavailable", "authentication storage is unavailable")
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"authenticated": authenticated,
 		"base_url":      s.cfg.PublicURL + "/v1",
 		"storage":       s.cfg.StorageDriver,
 		"client":        "codex-tui/" + s.cfg.CodexClientVersion,
+		"today":         time.Now().In(s.cfg.Location).Format("2006-01-02"),
 	})
 }
 
 func (s *Server) loginHandler(w http.ResponseWriter, r *http.Request) {
-	address := clientAddress(r)
+	address := s.clientAddress(r)
 	if allowed, wait := s.login.Allow(address); !allowed {
 		w.Header().Set("Retry-After", fmt.Sprintf("%.0f", wait.Seconds()))
 		writeError(w, http.StatusTooManyRequests, "login_blocked", "too many failed attempts")
@@ -69,7 +75,12 @@ func (s *Server) loginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hash, err := s.database.GetSetting(r.Context(), adminPasswordSetting)
-	if err != nil || !security.CheckPassword(hash, body.Password) {
+	if err != nil {
+		s.logger.Error("admin password lookup failed", "error", err)
+		writeError(w, http.StatusServiceUnavailable, "authentication_unavailable", "authentication storage is unavailable")
+		return
+	}
+	if !security.CheckPassword(hash, body.Password) {
 		s.login.Failure(address)
 		time.Sleep(250 * time.Millisecond)
 		writeError(w, http.StatusUnauthorized, "invalid_password", "password is incorrect")
@@ -80,7 +91,7 @@ func (s *Server) loginHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "session_failed", "could not create session")
 		return
 	}
-	if err = s.sessions.Put(r.Context(), "admin:"+security.HashSecret(token), "authenticated", s.cfg.SessionTTL); err != nil {
+	if err = s.sessions.Put(r.Context(), "admin:"+security.HashSecret(token), adminSessionValue(hash), s.cfg.SessionTTL); err != nil {
 		writeError(w, http.StatusInternalServerError, "session_failed", "could not store session")
 		return
 	}

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -30,6 +31,7 @@ type Config struct {
 	SessionTTL           time.Duration
 	Location             *time.Location
 	CookieSecure         bool
+	TrustedProxyCIDRs    []netip.Prefix
 }
 
 func Load() (Config, error) {
@@ -58,7 +60,14 @@ func Load() (Config, error) {
 	if err != nil || publicURL.Scheme == "" || publicURL.Host == "" {
 		return Config{}, fmt.Errorf("PUBLIC_URL must be an absolute URL")
 	}
+	if strings.EqualFold(publicURL.Hostname(), "xxx.xxx.com") {
+		return Config{}, fmt.Errorf("PUBLIC_URL still contains the example hostname xxx.xxx.com")
+	}
 	cfg.CookieSecure = strings.EqualFold(publicURL.Scheme, "https")
+	cfg.TrustedProxyCIDRs, err = parseTrustedProxyCIDRs(os.Getenv("TRUSTED_PROXY_CIDRS"))
+	if err != nil {
+		return Config{}, err
+	}
 
 	upstreamURL, err := url.Parse(cfg.UpstreamBaseURL)
 	if err != nil || upstreamURL.Scheme != "https" || upstreamURL.Host == "" {
@@ -90,6 +99,27 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("STORAGE_DRIVER must be sqlite or postgres")
 	}
 	return cfg, nil
+}
+
+func parseTrustedProxyCIDRs(raw string) ([]netip.Prefix, error) {
+	var prefixes []netip.Prefix
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		prefix, err := netip.ParsePrefix(entry)
+		if err != nil {
+			address, addressErr := netip.ParseAddr(entry)
+			if addressErr != nil {
+				return nil, fmt.Errorf("invalid TRUSTED_PROXY_CIDRS entry %q", entry)
+			}
+			address = address.Unmap()
+			prefix = netip.PrefixFrom(address, address.BitLen())
+		}
+		prefixes = append(prefixes, prefix.Masked())
+	}
+	return prefixes, nil
 }
 
 func env(name, fallback string) string {

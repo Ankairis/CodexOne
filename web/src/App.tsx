@@ -12,6 +12,11 @@ function pageFromHash(): Page {
   return value === 'account' || value === 'keys' ? value : 'overview'
 }
 
+function localToday() {
+  const date = new Date()
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+}
+
 export default function App() {
   const [session, setSession] = useState<SessionInfo | null>(null)
   const [page, setPage] = useState<Page>(pageFromHash())
@@ -19,7 +24,7 @@ export default function App() {
 
   const checkSession = useCallback(async () => {
     try { setSession(await api<SessionInfo>('/api/auth/session')) }
-    catch { setSession({ authenticated: false, base_url: '/v1', storage: 'sqlite', client: 'codex-tui' }) }
+    catch { setSession({ authenticated: false, base_url: '/v1', storage: 'sqlite', client: 'codex-tui', today: localToday() }) }
   }, [])
 
   useEffect(() => { void checkSession() }, [checkSession])
@@ -37,11 +42,18 @@ export default function App() {
   }, [toast])
 
   if (!session) return <div className="boot-screen"><div className="brand-mark large"><span>C</span></div></div>
-  if (!session.authenticated) return <Login onSuccess={() => void checkSession()} />
+  if (!session.authenticated) return <><Login onSuccess={() => void checkSession()} />{toast && <div className="toast" role="status">{toast}</div>}</>
 
   const navigate = (next: Page) => { window.location.hash = `/${next}`; setPage(next) }
-  const logout = async () => { await api('/api/auth/logout', { method: 'POST' }); setSession({ ...session, authenticated: false }) }
-  const content = page === 'account' ? <Account notify={setToast} /> : page === 'keys' ? <Keys notify={setToast} /> : <Overview notify={setToast} />
+  const logout = async () => {
+    try {
+      await api('/api/auth/logout', { method: 'POST' })
+      setSession({ ...session, authenticated: false })
+    } catch (cause) {
+      setToast(cause instanceof Error ? cause.message : '退出失败')
+    }
+  }
+  const content = page === 'account' ? <Account notify={setToast} /> : page === 'keys' ? <Keys notify={setToast} /> : <Overview today={session.today} notify={setToast} />
 
   return <><Shell page={page} session={session} onNavigate={navigate} onLogout={() => void logout()} notify={setToast}>{content}</Shell>{toast && <div className="toast" role="status">{toast}</div>}</>
 }

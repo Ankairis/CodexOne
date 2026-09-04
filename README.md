@@ -45,6 +45,8 @@ docker compose up -d --build
 docker compose logs codexone
 ```
 
+若 `PUBLIC_URL` 仍是示例值 `https://xxx.xxx.com`，服务会直接拒绝启动，避免出现“能登录但后台写操作被 Origin 校验拒绝”的半可用状态。
+
 首次启动如果未设置 `ADMIN_PASSWORD`，日志会且只会显示一次随机后台密码。打开 `PUBLIC_URL` 登录后应立即修改密码。
 
 SQLite 数据库、加密主密钥和日志都保存在 `codexone-data` volume。**必须同时备份数据库与 `master.key`**；丢失主密钥后，已保存的 OAuth Token 无法恢复。
@@ -123,6 +125,7 @@ go run ./cmd/server
 | `MASTER_KEY_FILE` | 与 SQLite 同目录的 `master.key` | SQLite 模式自动生成 |
 | `LOG_PATH` | `./data/codexone.log` | JSON 行日志 |
 | `APP_TIMEZONE` | `Asia/Shanghai` | “当天”统计所用时区 |
+| `TRUSTED_PROXY_CIDRS` | 空 | 可提供 `X-Forwarded-For` 的直连反向代理 IP/CIDR，逗号分隔 |
 | `REQUEST_RETENTION_DAYS` | `30` | 请求元数据保留天数 |
 | `MAX_REQUEST_MIB` | `32` | 单个代理请求正文上限 |
 | `SESSION_TTL_HOURS` | `24` | 后台登录有效期 |
@@ -135,6 +138,7 @@ go run ./cmd/server
 - OAuth Token 使用 AES-256-GCM 加密保存；API Key 明文不落盘。
 - 后台 Cookie 使用 HttpOnly、SameSite=Strict；`PUBLIC_URL` 为 HTTPS 时自动启用 Secure。
 - 状态修改接口校验浏览器 Origin；登录失败有本机地址级限速。
+- 默认忽略 `X-Forwarded-For`。只有在 `TRUSTED_PROXY_CIDRS` 中明确列出的直连代理才能提供客户端地址；不要填写不受你控制的宽泛网段。
 - 不要直接把 8080 端口暴露到公网，不要公开 `auth.json`、`.env`、数据库或 `master.key`。
 - SQLite 模式重启后管理员需要重新登录，未完成的设备码流程也会失效；持久数据不受影响。
 

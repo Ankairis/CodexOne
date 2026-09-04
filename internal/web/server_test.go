@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -161,6 +162,109 @@ func TestAdminLoginAndAPIKeyLifecycle(t *testing.T) {
 	handler.ServeHTTP(useRevoked, useRequest)
 	if useRevoked.Code != http.StatusUnauthorized {
 		t.Fatalf("revoked key status = %d", useRevoked.Code)
+	}
+}
+
+func TestPasswordChangeInvalidatesEveryExistingSession(t *testing.T) {
+	upstream := httptest.NewServer(http.NotFoundHandler())
+	defer upstream.Close()
+	handler, _, _, cleanup := testApplication(t, upstream.URL)
+	defer cleanup()
+
+	login := func(password string) (*http.Cookie, int) {
+		t.Helper()
+		response := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(fmt.Sprintf(`{"password":%q}`, password)))
+		handler.ServeHTTP(response, request)
+		cookies := response.Result().Cookies()
+		if response.Code != http.StatusOK {
+			return nil, response.Code
+		}
+		if len(cookies) != 1 {
+			t.Fatalf("login cookies = %#v", cookies)
+		}
+		return cookies[0], response.Code
+	}
+
+	first, status := login("correct horse battery")
+	if status != http.StatusOK {
+		t.Fatalf("first login status = %d", status)
+	}
+	second, status := login("correct horse battery")
+	if status != http.StatusOK {
+		t.Fatalf("second login status = %d", status)
+	}
+
+	change := httptest.NewRecorder()
+	changeRequest := httptest.NewRequest(http.MethodPut, "/api/admin/password", strings.NewReader(`{"current_password":"correct horse battery","new_password":"new correct horse battery"}`))
+	changeRequest.Header.Set("Origin", "http://codexone.test")
+	changeRequest.AddCookie(first)
+	handler.ServeHTTP(change, changeRequest)
+	if change.Code != http.StatusOK {
+		t.Fatalf("password change status = %d, body = %s", change.Code, change.Body.String())
+	}
+
+	for index, cookie := range []*http.Cookie{first, second} {
+		response := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "/api/admin/account", nil)
+		request.AddCookie(cookie)
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("old session %d status = %d, body = %s", index, response.Code, response.Body.String())
+		}
+	}
+
+	if _, status = login("correct horse battery"); status != http.StatusUnauthorized {
+		t.Fatalf("old password login status = %d", status)
+	}
+	if _, status = login("new correct horse battery"); status != http.StatusOK {
+		t.Fatalf("new password login status = %d", status)
+	}
+}
+
+func TestClientAddressOnlyTrustsConfiguredProxyChain(t *testing.T) {
+	server := &Server{cfg: config.Config{TrustedProxyCIDRs: []netip.Prefix{
+		netip.MustParsePrefix("10.0.0.0/8"),
+	}}}
+
+	tests := []struct {
+		name       string
+		remoteAddr string
+		forwarded  string
+		want       string
+	}{
+		{name: "untrusted peer ignores header", remoteAddr: "203.0.113.8:4444", forwarded: "198.51.100.9", want: "203.0.113.8"},
+		{name: "trusted peer supplies client", remoteAddr: "10.0.0.2:4444", forwarded: "198.51.100.9", want: "198.51.100.9"},
+		{name: "trusted chain walks from right", remoteAddr: "10.0.0.2:4444", forwarded: "192.0.2.7, 10.0.0.3", want: "192.0.2.7"},
+		{name: "invalid chain falls back to peer", remoteAddr: "10.0.0.2:4444", forwarded: "not-an-ip", want: "10.0.0.2"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/api/auth/login", nil)
+			request.RemoteAddr = test.remoteAddr
+			request.Header.Set("X-Forwarded-For", test.forwarded)
+			if got := server.clientAddress(request); got != test.want {
+				t.Fatalf("clientAddress() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestAPIKeyDatabaseFailureIsNotReportedAsInvalidKey(t *testing.T) {
+	upstream := httptest.NewServer(http.NotFoundHandler())
+	defer upstream.Close()
+	handler, database, apiKey, cleanup := testApplication(t, upstream.URL)
+	defer cleanup()
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	request.Header.Set("Authorization", "Bearer "+apiKey)
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"code":"database_unavailable"`) {
+		t.Fatalf("database failure status = %d, body = %s", response.Code, response.Body.String())
 	}
 }
 

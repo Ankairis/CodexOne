@@ -3,13 +3,8 @@ import { Activity, CheckCircle2, Clock3, Copy, KeyRound, RefreshCw, TerminalSqua
 import { api, copyText } from '../api'
 import { LogEntry, OverviewData, RequestEntry } from '../types'
 
-const today = () => {
-  const date = new Date()
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
-}
-
-export function Overview({ notify }: { notify: (message: string) => void }) {
-  const [date, setDate] = useState(today())
+export function Overview({ today, notify }: { today: string; notify: (message: string) => void }) {
+  const [date, setDate] = useState(today)
   const [data, setData] = useState<OverviewData | null>(null)
   const [logs, setLogs] = useState<LogEntry[]>([])
   const [selected, setSelected] = useState<RequestEntry | null>(null)

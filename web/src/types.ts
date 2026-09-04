@@ -3,6 +3,7 @@ export type SessionInfo = {
   base_url: string
   storage: 'sqlite' | 'postgres'
   client: string
+  today: string
 }
 
 export type TodayStats = {

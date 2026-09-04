@@ -74,9 +74,13 @@ export function Account({ notify }: { notify: (message: string) => void }) {
 
   const disconnect = async () => {
     if (!window.confirm('断开当前 Codex 账号？加密保存的 OAuth token 会被删除。')) return
-    await api('/api/admin/account', { method: 'DELETE' })
-    setAccount({ connected: false, client_name: account?.client_name ?? 'codex-tui' })
-    notify('账号已断开')
+    setBusy('disconnect'); setError('')
+    try {
+      await api('/api/admin/account', { method: 'DELETE' })
+      setAccount({ connected: false, client_name: account?.client_name ?? 'codex-tui' })
+      notify('账号已断开')
+    } catch (cause) { setError(cause instanceof Error ? cause.message : '断开账号失败') }
+    finally { setBusy('') }
   }
 
   if (loading) return <PageLoading />
@@ -103,7 +107,7 @@ export function Account({ notify }: { notify: (message: string) => void }) {
           <section className="account-summary panel">
             <div className="account-avatar"><UserRound size={24} /></div>
             <div className="account-main"><div className="account-name"><h2>{account.email || 'Codex account'}</h2><span className="status ok"><i />已连接</span></div><div className="account-meta"><span>套餐 <strong>{account.plan_type || quota?.plan_type || '未知'}</strong></span><span>Account ID <code>{account.account_id}</code></span><span>身份 <code>{account.client_name}</code></span></div></div>
-            <div className="account-actions"><button className="secondary-button" type="button" onClick={() => void startBrowserLogin()} disabled={busy === 'browser-login'}>{busy === 'browser-login' ? <LoaderCircle className="spin" size={16} /> : <LogIn size={16} />}重新登录</button><button className="danger-button" type="button" onClick={() => void disconnect()}><Unplug size={16} />断开</button></div>
+            <div className="account-actions"><button className="secondary-button" type="button" onClick={() => void startBrowserLogin()} disabled={busy === 'browser-login'}>{busy === 'browser-login' ? <LoaderCircle className="spin" size={16} /> : <LogIn size={16} />}重新登录</button><button className="danger-button" type="button" onClick={() => void disconnect()} disabled={busy === 'disconnect'}>{busy === 'disconnect' ? <LoaderCircle className="spin" size={16} /> : <Unplug size={16} />}断开</button></div>
           </section>
           <section className="panel quota-panel">
             <div className="panel-header"><div><h2>订阅额度</h2><span>{account.quota_fetched_at ? `更新于 ${formatDate(account.quota_fetched_at)}` : '尚未读取'}</span></div><button className="secondary-button" type="button" onClick={() => void refreshQuota()} disabled={busy === 'quota'}><RefreshCw className={busy === 'quota' ? 'spin' : ''} size={16} />刷新额度</button></div>
@@ -115,7 +119,7 @@ export function Account({ notify }: { notify: (message: string) => void }) {
       {flow && <DeviceModal flow={flow} onClose={() => setFlow(null)} notify={notify} />}
       {browserFlow && <BrowserOAuthModal flow={browserFlow} onClose={() => setBrowserFlow(null)} onConnected={(value) => { setAccount(value); setBrowserFlow(null); notify('Codex 浏览器登录成功') }} />}
       {importOpen && <ImportModal onClose={() => setImportOpen(false)} onImported={(value) => { setAccount(value); setImportOpen(false); notify('auth.json 已导入') }} />}
-      {passwordOpen && <PasswordModal onClose={() => setPasswordOpen(false)} onChanged={() => { setPasswordOpen(false); notify('后台密码已修改') }} />}
+      {passwordOpen && <PasswordModal onClose={() => setPasswordOpen(false)} onChanged={() => { setPasswordOpen(false); notify('后台密码已修改，请重新登录'); window.dispatchEvent(new Event('codexone:unauthorized')) }} />}
     </div>
   )
 }
