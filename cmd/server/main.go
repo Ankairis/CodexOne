@@ -102,9 +102,27 @@ func run() error {
 		}
 		return nil
 	}
+	proxyService.BeginShutdown()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	return server.Shutdown(shutdownCtx)
+	shutdownErr := server.Shutdown(shutdownCtx)
+	cancel()
+	if shutdownErr != nil {
+		logger.Warn("graceful HTTP shutdown timed out; closing active connections", "error", shutdownErr)
+		if closeErr := server.Close(); closeErr != nil {
+			logger.Warn("force-close HTTP server failed", "error", closeErr)
+		}
+	}
+
+	drainCtx, cancelDrain := context.WithTimeout(context.Background(), 5*time.Second)
+	drainErr := proxyService.WaitForIdle(drainCtx)
+	cancelDrain()
+	if drainErr != nil {
+		return fmt.Errorf("wait for proxy request logs: %w", drainErr)
+	}
+	if shutdownErr != nil && !errors.Is(shutdownErr, context.DeadlineExceeded) {
+		return fmt.Errorf("shutdown HTTP server: %w", shutdownErr)
+	}
+	return nil
 }
 
 type requestLogCleaner interface {

@@ -13,6 +13,10 @@ import (
 
 var ErrNotFound = errors.New("session not found")
 
+var ErrCapacity = errors.New("session store capacity exceeded")
+
+const defaultMemoryStoreCapacity = 4096
+
 type Store interface {
 	Put(context.Context, string, string, time.Duration) error
 	Get(context.Context, string) (string, error)
@@ -34,7 +38,7 @@ func New(ctx context.Context, cfg config.Config) (Store, error) {
 		}
 		return &redisStore{client: client, prefix: "codexone:"}, nil
 	}
-	return &memoryStore{items: make(map[string]memoryItem)}, nil
+	return newMemoryStore(defaultMemoryStoreCapacity), nil
 }
 
 type memoryItem struct {
@@ -43,21 +47,58 @@ type memoryItem struct {
 }
 
 type memoryStore struct {
-	mu    sync.RWMutex
-	items map[string]memoryItem
+	mu         sync.RWMutex
+	items      map[string]memoryItem
+	capacity   int
+	nextExpiry time.Time
 }
 
 func (s *memoryStore) Put(_ context.Context, key, value string, ttl time.Duration) error {
 	now := time.Now()
+	expiresAt := now.Add(ttl)
 	s.mu.Lock()
-	for itemKey, item := range s.items {
+	defer s.mu.Unlock()
+	s.removeExpiredLocked(now)
+	capacity := s.capacity
+	if capacity <= 0 {
+		capacity = defaultMemoryStoreCapacity
+	}
+	if _, exists := s.items[key]; !exists && len(s.items) >= capacity {
+		return ErrCapacity
+	}
+	s.items[key] = memoryItem{value: value, expiresAt: expiresAt}
+	if s.nextExpiry.IsZero() || expiresAt.Before(s.nextExpiry) {
+		s.nextExpiry = expiresAt
+	}
+	return nil
+}
+
+func newMemoryStore(capacity int) *memoryStore {
+	if capacity <= 0 {
+		capacity = defaultMemoryStoreCapacity
+	}
+	return &memoryStore{items: make(map[string]memoryItem), capacity: capacity}
+}
+
+func (s *memoryStore) removeExpiredLocked(now time.Time) {
+	if len(s.items) == 0 {
+		s.nextExpiry = time.Time{}
+		return
+	}
+	if !s.nextExpiry.IsZero() && s.nextExpiry.After(now) {
+		return
+	}
+	nextExpiry := time.Time{}
+	for key, item := range s.items {
 		if !item.expiresAt.After(now) {
-			delete(s.items, itemKey)
+			delete(s.items, key)
+			continue
+		}
+		if nextExpiry.IsZero() || item.expiresAt.Before(nextExpiry) {
+			nextExpiry = item.expiresAt
 		}
 	}
-	s.items[key] = memoryItem{value: value, expiresAt: now.Add(ttl)}
-	s.mu.Unlock()
-	return nil
+	s.nextExpiry = nextExpiry
 }
 
 func (s *memoryStore) Get(_ context.Context, key string) (string, error) {
@@ -67,9 +108,16 @@ func (s *memoryStore) Get(_ context.Context, key string) (string, error) {
 	if !ok {
 		return "", ErrNotFound
 	}
-	if time.Now().After(item.expiresAt) {
+	now := time.Now()
+	if !item.expiresAt.After(now) {
 		s.mu.Lock()
-		delete(s.items, key)
+		current, exists := s.items[key]
+		if exists && !current.expiresAt.After(now) {
+			delete(s.items, key)
+			if current.expiresAt.Equal(s.nextExpiry) {
+				s.nextExpiry = time.Time{}
+			}
+		}
 		s.mu.Unlock()
 		return "", ErrNotFound
 	}
@@ -78,7 +126,11 @@ func (s *memoryStore) Get(_ context.Context, key string) (string, error) {
 
 func (s *memoryStore) Delete(_ context.Context, key string) error {
 	s.mu.Lock()
+	item, exists := s.items[key]
 	delete(s.items, key)
+	if exists && item.expiresAt.Equal(s.nextExpiry) {
+		s.nextExpiry = time.Time{}
+	}
 	s.mu.Unlock()
 	return nil
 }

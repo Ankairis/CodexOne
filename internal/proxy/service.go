@@ -36,39 +36,62 @@ func APIKeyFromContext(ctx context.Context) (store.APIKey, bool) {
 }
 
 type Service struct {
-	cfg      config.Config
-	auth     *codex.Manager
-	store    *store.Store
-	logger   *slog.Logger
-	client   *http.Client
-	modelsMu sync.Mutex
-	models   []byte
-	modelsAt time.Time
+	cfg            config.Config
+	auth           *codex.Manager
+	store          *store.Store
+	logger         *slog.Logger
+	client         *http.Client
+	modelsMu       sync.Mutex
+	models         []byte
+	modelsAt       time.Time
+	activityMu     sync.Mutex
+	activeRequests int
+	shuttingDown   bool
+	idle           chan struct{}
 }
 
 func New(cfg config.Config, auth *codex.Manager, database *store.Store, logger *slog.Logger) *Service {
+	idle := make(chan struct{})
+	close(idle)
 	return &Service{
 		cfg:    cfg,
 		auth:   auth,
 		store:  database,
 		logger: logger,
 		client: &http.Client{},
+		idle:   idle,
 	}
 }
 
 func (s *Service) Responses(w http.ResponseWriter, r *http.Request) {
+	if !s.beginRequest(w) {
+		return
+	}
+	defer s.endRequest()
 	s.handleResponsesPath(w, r, "/backend-api/codex/responses")
 }
 
 func (s *Service) Compact(w http.ResponseWriter, r *http.Request) {
+	if !s.beginRequest(w) {
+		return
+	}
+	defer s.endRequest()
 	s.handlePassthroughJSON(w, r, "/backend-api/codex/responses/compact")
 }
 
 func (s *Service) InputTokens(w http.ResponseWriter, r *http.Request) {
+	if !s.beginRequest(w) {
+		return
+	}
+	defer s.endRequest()
 	s.handlePassthroughJSON(w, r, "/backend-api/codex/responses/input_tokens")
 }
 
 func (s *Service) Models(w http.ResponseWriter, r *http.Request) {
+	if !s.beginRequest(w) {
+		return
+	}
+	defer s.endRequest()
 	started := time.Now()
 	requestID := newID("req")
 	status := http.StatusOK
@@ -129,6 +152,57 @@ func (s *Service) Models(w http.ResponseWriter, r *http.Request) {
 	s.models, s.modelsAt = append([]byte(nil), converted...), time.Now()
 	s.modelsMu.Unlock()
 	writeJSONBytes(w, http.StatusOK, converted, requestID)
+}
+
+func (s *Service) beginRequest(w http.ResponseWriter) bool {
+	s.activityMu.Lock()
+	if s.shuttingDown {
+		s.activityMu.Unlock()
+		w.Header().Set("Retry-After", "5")
+		writeError(w, http.StatusServiceUnavailable, "server_shutting_down", "CodexOne is shutting down; retry shortly", newID("req"))
+		return false
+	}
+	if s.activeRequests == 0 {
+		s.idle = make(chan struct{})
+	}
+	s.activeRequests++
+	s.activityMu.Unlock()
+	return true
+}
+
+func (s *Service) endRequest() {
+	s.activityMu.Lock()
+	s.activeRequests--
+	if s.activeRequests == 0 {
+		close(s.idle)
+	}
+	s.activityMu.Unlock()
+}
+
+// BeginShutdown atomically stops accepting new proxy work while already
+// accepted handlers finish and persist their request logs.
+func (s *Service) BeginShutdown() {
+	s.activityMu.Lock()
+	s.shuttingDown = true
+	s.activityMu.Unlock()
+}
+
+// WaitForIdle returns only after every accepted proxy handler has completed,
+// including its deferred request-log write.
+func (s *Service) WaitForIdle(ctx context.Context) error {
+	s.activityMu.Lock()
+	idle := s.idle
+	active := s.activeRequests
+	s.activityMu.Unlock()
+	if active == 0 {
+		return nil
+	}
+	select {
+	case <-idle:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (s *Service) handleResponsesPath(w http.ResponseWriter, r *http.Request, upstreamPath string) {

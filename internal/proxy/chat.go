@@ -13,6 +13,10 @@ import (
 )
 
 func (s *Service) ChatCompletions(w http.ResponseWriter, r *http.Request) {
+	if !s.beginRequest(w) {
+		return
+	}
+	defer s.endRequest()
 	started := time.Now()
 	requestID := newID("req")
 	status := http.StatusOK

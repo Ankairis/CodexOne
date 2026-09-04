@@ -3,6 +3,7 @@ services:
     build:
       context: .
     restart: unless-stopped
+    stop_grace_period: 25s
     env_file:
       - .env
     environment:
