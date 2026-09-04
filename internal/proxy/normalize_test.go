@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -166,8 +167,9 @@ func TestConvertChatResponse(t *testing.T) {
 	raw := []byte(`{
 		"id":"resp_1","model":"gpt-test","created_at":100,
 		"output":[
-			{"type":"reasoning","summary":[{"type":"summary_text","text":"checked the inputs"}]},
+			{"type":"reasoning","summary":[{"type":"summary_text","text":"checked "},{"type":"summary_text","text":"the inputs"}]},
 			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]},
+			{"type":"message","role":"assistant","content":" safely"},
 			{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"}
 		],
 		"usage":{"input_tokens":10,"output_tokens":4,"total_tokens":14,"output_tokens_details":{"reasoning_tokens":3}}
@@ -185,7 +187,7 @@ func TestConvertChatResponse(t *testing.T) {
 		t.Fatalf("finish_reason = %v", choice["finish_reason"])
 	}
 	message := choice["message"].(map[string]any)
-	if message["content"] != "done" || len(message["tool_calls"].([]any)) != 1 {
+	if message["content"] != "done safely" || len(message["tool_calls"].([]any)) != 1 {
 		t.Fatalf("message = %#v", message)
 	}
 	if message["reasoning_content"] != "checked the inputs" {
@@ -214,7 +216,7 @@ func TestTranslateChatEventPreservesReasoningAndUsage(t *testing.T) {
 		}
 	}
 	output := recorder.Body.String()
-	for _, want := range []string{`"reasoning_content":"check inputs"`, `"reasoning_content":"\n\n"`, `"content":"done"`, `"reasoning_tokens":3`, "data: [DONE]"} {
+	for _, want := range []string{`"reasoning_content":"check inputs"`, `"reasoning_content":"\n\n"`, `"content":"done"`, `"reasoning_tokens":3`, `"choices":[]`, "data: [DONE]"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("stream output does not contain %q:\n%s", want, output)
 		}
@@ -224,6 +226,40 @@ func TestTranslateChatEventPreservesReasoningAndUsage(t *testing.T) {
 	}
 	if state.usage.EffectiveReasoningEffort != "max" || state.telemetry.FirstReasoningMS == 0 || state.telemetry.FirstOutputMS == 0 {
 		t.Fatalf("stream telemetry = usage:%#v telemetry:%#v", state.usage, state.telemetry)
+	}
+}
+
+func TestTranslateChatEventPreservesResponseFailure(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	state := &chatStreamState{model: "gpt-test", created: 100, tools: make(map[int]int), started: time.Now()}
+	payload := []byte(`{"type":"response.failed","response":{"id":"resp_failed","error":{"code":"server_error","message":"quota exceeded"}}}`)
+	if err := translateChatEvent(recorder, recorder, payload, state, true); err != nil {
+		t.Fatal(err)
+	}
+	output := recorder.Body.String()
+	if !state.terminalSent || !strings.Contains(output, `"message":"quota exceeded"`) || !strings.Contains(output, "data: [DONE]") {
+		t.Fatalf("failed event output = %q, terminal = %v", output, state.terminalSent)
+	}
+	if strings.Contains(output, `"finish_reason":"stop"`) {
+		t.Fatalf("failed event was converted to a successful completion: %s", output)
+	}
+}
+
+func TestCollectResponseReturnsResponseFailure(t *testing.T) {
+	stream := "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"upstream rejected request\"}}}\n\n"
+	if _, _, err := collectResponse(strings.NewReader(stream)); err == nil || !strings.Contains(err.Error(), "upstream rejected request") {
+		t.Fatalf("collectResponse() error = %v", err)
+	}
+}
+
+func TestCopyQuotaHeadersIsIdempotent(t *testing.T) {
+	source := make(http.Header)
+	source.Add("X-Ratelimit-Remaining-Requests", "4")
+	target := make(http.Header)
+	copyQuotaHeaders(target, source)
+	copyQuotaHeaders(target, source)
+	if values := target.Values("X-Ratelimit-Remaining-Requests"); len(values) != 1 || values[0] != "4" {
+		t.Fatalf("copied quota headers = %#v", values)
 	}
 }
 

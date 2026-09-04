@@ -105,7 +105,7 @@ func TestV1ResponsesUsesAPIKeyAndFixedCodexIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(logs) != 1 || logs[0].InputTokens != 3 || logs[0].OutputTokens != 2 || logs[0].APIKeyID == "" ||
-		logs[0].ReasoningEffort != "max" || logs[0].UpstreamReasoningEffort != "max" || logs[0].ReasoningTokens != 1 || logs[0].FirstOutputMS == 0 {
+		logs[0].ReasoningEffort != "max" || logs[0].UpstreamReasoningEffort != "max" || logs[0].ReasoningTokens != 1 || logs[0].FirstOutputMS != 0 {
 		t.Fatalf("request logs = %#v", logs)
 	}
 }

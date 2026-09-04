@@ -197,7 +197,7 @@ func (s *Service) handleResponsesPath(w http.ResponseWriter, r *http.Request, up
 		return
 	}
 	inputTokens, outputTokens = usage.InputTokens, usage.OutputTokens
-	telemetry.mergeResponse(requestTelemetry{FirstOutputMS: elapsedMS(started)}, usage)
+	telemetry.mergeResponse(requestTelemetry{}, usage)
 	writeJSONBytes(w, http.StatusOK, final, requestID)
 }
 
@@ -400,8 +400,8 @@ func collectResponse(reader io.Reader) ([]byte, tokenUsage, error) {
 					if (event.Type == "response.completed" || event.Type == "response.incomplete") && len(event.Response) > 0 {
 						final = append(final[:0], event.Response...)
 					}
-					if event.Type == "error" {
-						upstreamErr = event.Error.Message
+					if event.Type == "error" || event.Type == "response.failed" {
+						upstreamErr = responseFailureMessage(event.Error.Message, event.Response)
 					}
 				}
 			}
@@ -420,6 +420,23 @@ func collectResponse(reader io.Reader) ([]byte, tokenUsage, error) {
 		return nil, usage, fmt.Errorf("upstream stream ended without a completed response")
 	}
 	return final, usage, nil
+}
+
+func responseFailureMessage(topLevel string, response json.RawMessage) string {
+	if message := strings.TrimSpace(topLevel); message != "" {
+		return message
+	}
+	var payload struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if len(response) > 0 && json.Unmarshal(response, &payload) == nil {
+		if message := strings.TrimSpace(payload.Error.Message); message != "" {
+			return message
+		}
+	}
+	return "upstream response failed"
 }
 
 func observeSSE(line []byte, usage *tokenUsage, telemetry *requestTelemetry, started time.Time) {
@@ -507,6 +524,7 @@ func copyQuotaHeaders(target, source http.Header) {
 		lower := strings.ToLower(name)
 		if strings.HasPrefix(lower, "x-codex-") || strings.HasPrefix(lower, "x-ratelimit-") ||
 			lower == "retry-after" || lower == "openai-request-id" {
+			target.Del(name)
 			for _, value := range values {
 				target.Add(name, value)
 			}

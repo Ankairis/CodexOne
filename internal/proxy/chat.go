@@ -79,7 +79,7 @@ func (s *Service) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	inputTokens, outputTokens = usage.InputTokens, usage.OutputTokens
-	telemetry.mergeResponse(requestTelemetry{FirstOutputMS: elapsedMS(started)}, usage)
+	telemetry.mergeResponse(requestTelemetry{}, usage)
 	converted, err := convertChatResponse(final)
 	if err != nil {
 		status, errText = http.StatusBadGateway, err.Error()
@@ -316,7 +316,6 @@ func convertChatResponse(raw []byte) ([]byte, error) {
 						if text, _ := part["text"].(string); text != "" {
 							reasoningParts = append(reasoningParts, text)
 						}
-						break
 					}
 				}
 			}
@@ -331,7 +330,12 @@ func convertChatResponse(raw []byte) ([]byte, error) {
 				}
 			}
 		case "message":
-			if content, ok := item["content"].([]any); ok {
+			switch content := item["content"].(type) {
+			case string:
+				if content != "" {
+					textParts = append(textParts, content)
+				}
+			case []any:
 				for _, partValue := range content {
 					part, _ := partValue.(map[string]any)
 					if text, _ := part["text"].(string); text != "" {
@@ -461,6 +465,10 @@ func translateChatEvent(w io.Writer, flusher http.Flusher, payload []byte, state
 		}
 		return writeChatData(w, flusher, chunk)
 	}
+	sendUsage := func(usage map[string]any) error {
+		chunk := map[string]any{"id": state.id, "object": "chat.completion.chunk", "created": state.created, "model": state.model, "choices": []any{}, "usage": usage}
+		return writeChatData(w, flusher, chunk)
+	}
 	ensureRole := func() error {
 		if state.roleSent {
 			return nil
@@ -524,21 +532,23 @@ func translateChatEvent(w io.Writer, flusher http.Flusher, payload []byte, state
 		if len(state.tools) > 0 {
 			finish = "tool_calls"
 		}
-		var usage any
-		if includeUsage {
-			usageMap := map[string]any{"prompt_tokens": state.usage.InputTokens, "completion_tokens": state.usage.OutputTokens, "total_tokens": state.usage.InputTokens + state.usage.OutputTokens}
-			if state.usage.HasReasoningTokens {
-				usageMap["completion_tokens_details"] = map[string]any{"reasoning_tokens": state.usage.ReasoningTokens}
-			}
-			usage = usageMap
-		}
-		if err := send(map[string]any{}, finish, usage); err != nil {
+		if err := send(map[string]any{}, finish, nil); err != nil {
 			return err
+		}
+		if includeUsage {
+			usage := map[string]any{"prompt_tokens": state.usage.InputTokens, "completion_tokens": state.usage.OutputTokens, "total_tokens": state.usage.InputTokens + state.usage.OutputTokens}
+			if state.usage.HasReasoningTokens {
+				usage["completion_tokens_details"] = map[string]any{"reasoning_tokens": state.usage.ReasoningTokens}
+			}
+			if err := sendUsage(usage); err != nil {
+				return err
+			}
 		}
 		state.terminalSent = true
 		return writeChatDone(w, flusher)
-	case "error":
-		if err := writeChatData(w, flusher, map[string]any{"error": map[string]any{"message": event.Error.Message, "type": "upstream_error"}}); err != nil {
+	case "error", "response.failed":
+		message := responseFailureMessage(event.Error.Message, event.Response)
+		if err := writeChatData(w, flusher, map[string]any{"error": map[string]any{"message": message, "type": "upstream_error"}}); err != nil {
 			return err
 		}
 		state.terminalSent = true
