@@ -47,9 +47,9 @@ export function Overview({ today, notify }: { today: string; notify: (message: s
   return (
     <div className="page-stack">
       <div className="page-title-row">
-        <div><h1>总览</h1><p>当天请求、延迟和运行日志</p></div>
+        <div className="page-heading"><span className="page-eyebrow">Live workspace</span><h1>运行总览</h1><p>查看请求质量、推理表现与服务运行状态。</p></div>
         <div className="page-actions">
-          <input className="date-input" type="date" value={date} onChange={(event) => setDate(event.target.value)} />
+          <label className="date-control"><span>统计日期</span><input className="date-input" type="date" value={date} onChange={(event) => setDate(event.target.value)} /></label>
           <button className="secondary-button" type="button" onClick={() => void load()} disabled={loading}><RefreshCw className={loading ? 'spin' : ''} size={16} />刷新</button>
         </div>
       </div>
@@ -61,12 +61,12 @@ export function Overview({ today, notify }: { today: string; notify: (message: s
         <Metric icon={Zap} label="Token" value={formatNumber(totalTokens)} hint={`${formatNumber(stats?.input_tokens ?? 0)} 输入 / ${formatNumber(stats?.output_tokens ?? 0)} 输出 · ${formatNumber(stats?.reasoning_tokens ?? 0)} 推理`} tone="violet" />
       </section>
       <section className="panel request-panel">
-        <div className="panel-header"><div><h2>请求详情</h2><span>{requestSummary}</span></div>{data && <button className="quiet-button" type="button" onClick={async () => { await copyText(data.base_url); notify('Base URL 已复制') }}><Copy size={15} />复制 Base URL</button>}</div>
+        <div className="panel-header"><div><h2><Activity size={18} />请求详情</h2><span>{requestSummary}</span></div>{data && <button className="quiet-button" type="button" onClick={async () => { await copyText(data.base_url); notify('Base URL 已复制') }}><Copy size={15} />复制 Base URL</button>}</div>
         <div className="table-scroll">
           <table>
             <thead><tr><th>时间</th><th>状态</th><th>模型</th><th>API Key</th><th>延迟</th><th>推理</th><th>Token</th><th>Request ID</th></tr></thead>
             <tbody>
-              {!loading && !data?.requests.length && <tr><td className="empty-cell" colSpan={8}>这一天还没有请求</td></tr>}
+              {!loading && !data?.requests.length && <tr><td className="empty-cell" colSpan={8}><Activity size={22} />这一天还没有请求<span>客户端发起请求后会显示在这里</span></td></tr>}
               {data?.requests.map((entry) => (
                 <tr key={entry.id} className={selected?.id === entry.id ? 'selected-row' : ''} onClick={() => setSelected(entry)}>
                   <td>{formatTime(entry.created_at)}</td>
@@ -93,7 +93,7 @@ export function Overview({ today, notify }: { today: string; notify: (message: s
 }
 
 function Metric({ icon: Icon, label, value, hint, tone = '' }: { icon: typeof Activity; label: string; value: string; hint: string; tone?: string }) {
-  return <div className={`metric ${tone}`}><div className="metric-icon"><Icon size={18} /></div><div><span>{label}</span><strong>{value}</strong><small>{hint}</small></div></div>
+  return <div className={`metric ${tone}`}><div className="metric-top"><span>{label}</span><div className="metric-icon"><Icon size={18} /></div></div><strong>{value}</strong><small>{hint}</small><i className="metric-accent" /></div>
 }
 
 function Status({ status }: { status: number }) {

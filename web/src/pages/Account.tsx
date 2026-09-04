@@ -106,11 +106,12 @@ export function Account({ notify }: { notify: (message: string) => void }) {
 
   return (
     <div className="page-stack">
-      <div className="page-title-row"><div><h1>Codex 账号</h1><p>唯一上游账号、登录状态和订阅额度</p></div><button className="secondary-button" type="button" onClick={() => setPasswordOpen(true)}><LockKeyhole size={16} />修改后台密码</button></div>
+      <div className="page-title-row"><div className="page-heading"><span className="page-eyebrow">Upstream identity</span><h1>Codex 账号</h1><p>管理唯一上游账号、登录状态与订阅额度。</p></div><button className="secondary-button" type="button" onClick={() => setPasswordOpen(true)}><LockKeyhole size={16} />修改后台密码</button></div>
       {error && <div className="notice error">{error}<button type="button" onClick={() => setError('')}>×</button></div>}
       {!account?.connected ? (
         <section className="account-empty">
           <div className="account-empty-icon"><UserRound size={28} /></div>
+          <span className="page-eyebrow">Start here</span>
           <h2>连接你的 Codex 订阅</h2>
           <p>CodexOne 只保存并使用一个上游账号。再次登录会覆盖当前凭据，不会形成账号池。</p>
           <div className="empty-actions">
@@ -118,12 +119,12 @@ export function Account({ notify }: { notify: (message: string) => void }) {
             <button className="secondary-button" type="button" onClick={() => void startDeviceLogin()} disabled={busy === 'device-login'}>{busy === 'device-login' ? <LoaderCircle className="spin" size={17} /> : <LogIn size={17} />}使用设备码登录</button>
             <button className="secondary-button" type="button" onClick={() => setImportOpen(true)}><FileJson size={17} />导入 auth.json</button>
           </div>
-          <div className="compat-line"><ShieldCheck size={15} />上游身份固定为 {account?.client_name || 'codex-tui'}</div>
+          <div className="compat-line"><ShieldCheck size={15} /><span>上游身份固定为 <code>{account?.client_name || 'codex-tui'}</code></span></div>
         </section>
       ) : (
         <>
           <section className="account-summary panel">
-            <div className="account-avatar"><UserRound size={24} /></div>
+            <div className="account-avatar"><UserRound size={24} /><i /></div>
             <div className="account-main"><div className="account-name"><h2>{account.email || 'Codex account'}</h2><span className="status ok"><i />已连接</span></div><div className="account-meta"><span>套餐 <strong>{account.plan_type || quota?.plan_type || '未知'}</strong></span><span>Account ID <code>{account.account_id}</code></span><span>身份 <code>{account.client_name}</code></span></div></div>
             <div className="account-actions"><button className="secondary-button" type="button" onClick={() => void startBrowserLogin()} disabled={busy === 'browser-login'}>{busy === 'browser-login' ? <LoaderCircle className="spin" size={16} /> : <LogIn size={16} />}重新登录</button><button className="danger-button" type="button" onClick={() => void disconnect()} disabled={busy === 'disconnect'}>{busy === 'disconnect' ? <LoaderCircle className="spin" size={16} /> : <Unplug size={16} />}断开</button></div>
           </section>

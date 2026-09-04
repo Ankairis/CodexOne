@@ -20,7 +20,7 @@ export function Keys({ notify }: { notify: (message: string) => void }) {
 
   return (
     <div className="page-stack">
-      <div className="page-title-row"><div><h1>API Keys</h1><p>管理访问 /v1 的客户端凭据</p></div><button className="primary-button" type="button" onClick={() => setCreateOpen(true)}><Plus size={17} />创建 Key</button></div>
+      <div className="page-title-row"><div className="page-heading"><span className="page-eyebrow">Client access</span><h1>API Keys</h1><p>创建和管理访问 <code>/v1</code> 的客户端凭据。</p></div><button className="primary-button" type="button" onClick={() => setCreateOpen(true)}><Plus size={17} />创建 Key</button></div>
       {error && <div className="notice error">{error}<button type="button" onClick={() => setError('')}>×</button></div>}
       <section className="panel key-panel">
         <div className="panel-header"><div><h2>访问密钥</h2><span>密钥明文只在创建时显示一次</span></div><span className="count-badge">{keys.filter((key) => !key.revoked_at).length} 个有效</span></div>
