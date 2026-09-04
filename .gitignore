@@ -2,13 +2,32 @@
 .env.*
 !.env.example
 
+# Local credentials and authentication exports.
+auth.json
+master.key
+credentials.json
+*.pem
+*.p12
+*.pfx
+*.key
+
 /data/
 /bin/
+/dist/
+/package/
+/codexone
+/server
 /*.exe
 /*.log
 /*.db
 /*.db-shm
 /*.db-wal
+
+# Test and coverage output.
+coverage/
+coverage.out
+coverage.html
+*.coverprofile
 
 /web/node_modules/
 /web/*.tsbuildinfo
