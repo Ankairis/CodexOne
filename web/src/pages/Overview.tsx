@@ -33,6 +33,11 @@ export function Overview({ today, notify }: { today: string; notify: (message: s
 
   const stats = data?.stats
   const totalTokens = (stats?.input_tokens ?? 0) + (stats?.output_tokens ?? 0)
+  const requestSummary = data
+    ? data.stats.requests > data.requests.length
+      ? `共 ${formatNumber(data.stats.requests)} 条，仅显示最近 ${formatNumber(data.requests.length)} 条`
+      : `${formatNumber(data.requests.length)} 条记录`
+    : '0 条记录'
   const logLines = useMemo(() => logs.map((entry) => {
     const stamp = new Date(entry.timestamp).toLocaleTimeString('zh-CN', { hour12: false })
     const fields = entry.fields && Object.keys(entry.fields).length ? ` ${JSON.stringify(entry.fields)}` : ''
@@ -56,7 +61,7 @@ export function Overview({ today, notify }: { today: string; notify: (message: s
         <Metric icon={Zap} label="Token" value={formatNumber(totalTokens)} hint={`${formatNumber(stats?.input_tokens ?? 0)} 输入 / ${formatNumber(stats?.output_tokens ?? 0)} 输出 · ${formatNumber(stats?.reasoning_tokens ?? 0)} 推理`} tone="violet" />
       </section>
       <section className="panel request-panel">
-        <div className="panel-header"><div><h2>请求详情</h2><span>{data?.requests.length ?? 0} 条记录</span></div>{data && <button className="quiet-button" type="button" onClick={async () => { await copyText(data.base_url); notify('Base URL 已复制') }}><Copy size={15} />复制 Base URL</button>}</div>
+        <div className="panel-header"><div><h2>请求详情</h2><span>{requestSummary}</span></div>{data && <button className="quiet-button" type="button" onClick={async () => { await copyText(data.base_url); notify('Base URL 已复制') }}><Copy size={15} />复制 Base URL</button>}</div>
         <div className="table-scroll">
           <table>
             <thead><tr><th>时间</th><th>状态</th><th>模型</th><th>API Key</th><th>延迟</th><th>推理</th><th>Token</th><th>Request ID</th></tr></thead>

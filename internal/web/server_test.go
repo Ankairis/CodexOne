@@ -174,6 +174,18 @@ func TestAccountFailureDoesNotExposeCredentialDetails(t *testing.T) {
 	}
 }
 
+func TestDecodeJSONReportsOversizedBody(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/api/test", strings.NewReader(`{"value":"`+strings.Repeat("x", int(adminJSONBodyLimit))+`"}`))
+	response := httptest.NewRecorder()
+	var target map[string]any
+	if decodeJSON(response, request, &target) {
+		t.Fatal("decodeJSON() accepted an oversized body")
+	}
+	if response.Code != http.StatusRequestEntityTooLarge || !strings.Contains(response.Body.String(), `"code":"request_too_large"`) {
+		t.Fatalf("oversized response = %d %s", response.Code, response.Body.String())
+	}
+}
+
 func TestAdminLoginAndAPIKeyLifecycle(t *testing.T) {
 	upstream := httptest.NewServer(http.NotFoundHandler())
 	defer upstream.Close()

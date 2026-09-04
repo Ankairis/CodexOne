@@ -33,6 +33,8 @@ type Server struct {
 	login    *loginLimiter
 }
 
+const adminJSONBodyLimit int64 = 2 << 20
+
 func New(cfg config.Config, database *store.Store, sessions session.Store, codexManager *codex.Manager, proxyService *proxy.Service, logger *slog.Logger, logs *appLog.Ring) http.Handler {
 	server := &Server{
 		cfg:      cfg,
@@ -134,13 +136,23 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20))
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, adminJSONBodyLimit))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
+		var maxBytesError *http.MaxBytesError
+		if errors.As(err, &maxBytesError) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds the 2 MiB limit")
+			return false
+		}
 		writeError(w, http.StatusBadRequest, "invalid_json", "request body is invalid")
 		return false
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		var maxBytesError *http.MaxBytesError
+		if errors.As(err, &maxBytesError) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds the 2 MiB limit")
+			return false
+		}
 		writeError(w, http.StatusBadRequest, "invalid_json", "request body must contain one JSON value")
 		return false
 	}

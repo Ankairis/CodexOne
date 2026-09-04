@@ -1,6 +1,6 @@
 import { FormEvent, useCallback, useEffect, useState } from 'react'
 import { CheckCircle2, Clipboard, Clock3, ExternalLink, FileJson, LoaderCircle, LockKeyhole, LogIn, RefreshCw, ShieldCheck, Unplug, UserRound } from 'lucide-react'
-import { api, copyText } from '../api'
+import { api, APIError, copyText } from '../api'
 import { AccountInfo, BrowserOAuthFlow, DeviceFlow, QuotaPayload, RateWindow } from '../types'
 import { Modal } from '../components/Modal'
 
@@ -24,16 +24,34 @@ export function Account({ notify }: { notify: (message: string) => void }) {
   useEffect(() => {
     if (!flow) return
     let stopped = false
+    let consecutiveFailures = 0
     const poll = async () => {
+      if (Date.now() >= flow.expires_at) {
+        if (!stopped) { setFlow(null); setError('设备码已过期，请重新登录') }
+        return
+      }
       try {
         const result = await api<{ status: string; account?: AccountInfo }>(`/api/admin/account/device/${encodeURIComponent(flow.flow_id)}`)
+        consecutiveFailures = 0
+        if (!stopped) setError('')
         if (!stopped && result.status === 'complete') {
           setFlow(null)
           setAccount(result.account ?? null)
           notify('Codex 登录成功')
         }
       } catch (cause) {
-        if (!stopped) { setFlow(null); setError(cause instanceof Error ? cause.message : '登录失败') }
+        if (stopped) return
+        if (cause instanceof APIError && cause.status === 401) {
+          setFlow(null)
+          return
+        }
+        consecutiveFailures += 1
+        if (consecutiveFailures >= 3) {
+          setFlow(null)
+          setError(cause instanceof Error ? cause.message : '登录失败')
+        } else {
+          setError(`设备码轮询暂时失败，正在重试（${consecutiveFailures}/3）`)
+        }
       }
     }
     const timer = window.setInterval(() => void poll(), Math.max(flow.poll_interval, 3) * 1000)
