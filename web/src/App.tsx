@@ -41,7 +41,7 @@ export default function App() {
     return () => window.clearTimeout(timer)
   }, [toast])
 
-  if (!session) return <div className="boot-screen"><div className="brand-mark large"><span>C</span></div></div>
+  if (!session) return <div className="boot-screen"><div className="brand-mark large"><img src="/codexone-logo.svg" alt="CodexOne" /></div></div>
   if (!session.authenticated) return <><Login onSuccess={() => void checkSession()} />{toast && <div className="toast" role="status">{toast}</div>}</>
 
   const navigate = (next: Page) => { window.location.hash = `/${next}`; setPage(next) }

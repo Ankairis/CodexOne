@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title id="title">CodexOne</title>
+  <path d="M190 54A92 92 0 1 0 190 202" fill="none" stroke="#181a1d" stroke-width="32" stroke-linecap="round"/>
+  <circle cx="128" cy="128" r="21" fill="#20a279"/>
+  <path d="M149 128h58m-20-21 21 21-21 21" fill="none" stroke="#20a279" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

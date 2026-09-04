@@ -1,10 +1,42 @@
-# CodexOne
+<div align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="web/public/codexone-logo-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="web/public/codexone-logo.svg">
+    <img src="web/public/codexone-logo.svg" alt="CodexOne" width="168">
+  </picture>
+  <h1>CodexOne</h1>
+  <p><strong>一个账号，一个入口，一套自己掌控的 Codex 网关。</strong></p>
+  <p>将个人 ChatGPT/Codex 登录转换为 OpenAI-compatible <code>/v1</code> Base URL。</p>
+  <p>
+    <a href="https://github.com/Ankairis/CodexOne/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Ankairis/CodexOne/actions/workflows/ci.yml/badge.svg"></a>
+    <a href="https://github.com/Ankairis/CodexOne/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/Ankairis/CodexOne?display_name=tag&sort=semver"></a>
+    <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/Ankairis/CodexOne"></a>
+    <img alt="Go 1.26.6" src="https://img.shields.io/badge/Go-1.26.6-00ADD8?logo=go&logoColor=white">
+    <img alt="Single-account" src="https://img.shields.io/badge/mode-single--account-20A279">
+  </p>
+  <p>
+    <a href="https://github.com/Ankairis">Ankairis</a>
+    · Co-author <a href="https://github.com/YnSaki">YnSaki</a>
+  </p>
+</div>
 
-一个面向个人自用的单账号 Codex 反向代理。它把自己的 ChatGPT/Codex 登录转换为 OpenAI 兼容的 `/v1` Base URL，并提供一套完全独立编写的管理后台。
-
-**Co-author: [YnSaki](https://github.com/YnSaki)**
-
+> [!IMPORTANT]
 > CodexOne 是非官方社区项目，与 OpenAI 无隶属或背书关系。请仅代理你本人有权使用的账号，并自行遵守适用的服务条款。项目不提供账号池、订阅共享、多人额度分发、计费或转售功能。
+
+## 一眼了解
+
+| 🔒 物理单账号 | 🔌 OpenAI 兼容 | 🧭 独立管理后台 | 🗄️ 两种存储模式 |
+| --- | --- | --- | --- |
+| 从数据层杜绝账号池与轮询 | Responses 与 Chat Completions | 总览、账号、API Key 三个页面 | SQLite，或 PostgreSQL + Redis |
+
+## 工作方式
+
+```mermaid
+flowchart LR
+    Client["你的客户端"] -->|"Bearer API Key"| Gateway["CodexOne · /v1"]
+    Gateway -->|"Codex 协议适配"| Codex["ChatGPT Codex"]
+    Gateway --> Store[("SQLite<br/>或 PostgreSQL + Redis")]
+```
 
 ## 核心边界
 

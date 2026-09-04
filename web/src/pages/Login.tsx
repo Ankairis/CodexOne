@@ -24,7 +24,7 @@ export function Login({ onSuccess }: { onSuccess: () => void }) {
   return (
     <main className="login-page">
       <section className="login-panel">
-        <div className="login-brand"><div className="brand-mark large"><span>C</span></div><span>CodexOne</span></div>
+        <div className="login-brand"><div className="brand-mark large"><img src="/codexone-logo.svg" alt="" aria-hidden="true" /></div><span>CodexOne</span></div>
         <div className="login-heading">
           <h1>进入管理后台</h1>
           <p>使用服务首次启动时生成的管理员密码。</p>

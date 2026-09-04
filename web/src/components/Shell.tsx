@@ -30,7 +30,7 @@ export function Shell({ page, session, children, onNavigate, onLogout, notify }:
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-mark"><span>C</span></div>
+          <div className="brand-mark"><img src="/codexone-logo-dark.svg" alt="" aria-hidden="true" /></div>
           <div><strong>CodexOne</strong><small>Personal gateway</small></div>
         </div>
         <nav className="nav-list" aria-label="主导航">
