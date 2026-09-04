@@ -84,13 +84,13 @@ type BrowserStart struct {
 }
 
 type Manager struct {
-	cfg      config.Config
-	store    *store.Store
-	cipher   *cryptox.Cipher
-	sessions session.Store
-	client   *http.Client
-	logger   *slog.Logger
-	refresh  sync.Mutex
+	cfg          config.Config
+	store        *store.Store
+	cipher       *cryptox.Cipher
+	sessions     session.Store
+	client       *http.Client
+	logger       *slog.Logger
+	credentialMu sync.Mutex
 }
 
 func NewManager(cfg config.Config, database *store.Store, cipher *cryptox.Cipher, sessions session.Store, logger *slog.Logger) *Manager {
@@ -225,7 +225,7 @@ func (m *Manager) PollDeviceFlow(ctx context.Context, flowID string) (DeviceStat
 	if err != nil {
 		return DeviceStatus{}, err
 	}
-	if err = m.save(ctx, credential); err != nil {
+	if err = m.replaceCredential(ctx, credential); err != nil {
 		return DeviceStatus{}, err
 	}
 	_ = m.sessions.Delete(ctx, "oauth:"+flowID)
@@ -305,7 +305,7 @@ func (m *Manager) CompleteBrowserFlow(ctx context.Context, flowID, callbackURL s
 	if err != nil {
 		return AccountView{}, err
 	}
-	if err = m.save(ctx, credential); err != nil {
+	if err = m.replaceCredential(ctx, credential); err != nil {
 		return AccountView{}, err
 	}
 	_ = m.sessions.Delete(ctx, "oauth-browser:"+flowID)
@@ -325,7 +325,7 @@ func (m *Manager) ImportAuthJSON(ctx context.Context, raw []byte) (AccountView, 
 	if err != nil {
 		return AccountView{}, err
 	}
-	if err = m.save(ctx, credential); err != nil {
+	if err = m.replaceCredential(ctx, credential); err != nil {
 		return AccountView{}, err
 	}
 	m.logger.Info("codex account imported", "email", credential.Email, "plan", credential.PlanType)
@@ -357,6 +357,8 @@ func (m *Manager) Account(ctx context.Context) (AccountView, error) {
 }
 
 func (m *Manager) DeleteAccount(ctx context.Context) error {
+	m.credentialMu.Lock()
+	defer m.credentialMu.Unlock()
 	if err := m.store.DeleteAccount(ctx); err != nil {
 		return err
 	}
@@ -405,8 +407,8 @@ func (m *Manager) FreshCredential(ctx context.Context) (Credential, error) {
 		return credential, nil
 	}
 
-	m.refresh.Lock()
-	defer m.refresh.Unlock()
+	m.credentialMu.Lock()
+	defer m.credentialMu.Unlock()
 	credential, err = m.Credential(ctx)
 	if err != nil {
 		return Credential{}, err
@@ -440,7 +442,7 @@ func (m *Manager) FreshCredential(ctx context.Context) (Credential, error) {
 	if refreshed.PlanType == "" {
 		refreshed.PlanType = credential.PlanType
 	}
-	if err = m.save(ctx, refreshed); err != nil {
+	if err = m.saveCredential(ctx, refreshed); err != nil {
 		return Credential{}, err
 	}
 	m.logger.Info("codex access token refreshed", "email", refreshed.Email)
@@ -493,14 +495,20 @@ func (m *Manager) ApplyCodexHeaders(req *http.Request, credential Credential, ac
 	req.Header.Set("Originator", "codex-tui")
 	req.Header.Set("Version", m.cfg.CodexClientVersion)
 	req.Header.Set("Accept", accept)
-	req.Header.Set("Connection", "Keep-Alive")
 }
 
 func (m *Manager) clientName() string {
 	return "codex-tui/" + m.cfg.CodexClientVersion
 }
 
-func (m *Manager) save(ctx context.Context, credential Credential) error {
+func (m *Manager) replaceCredential(ctx context.Context, credential Credential) error {
+	m.credentialMu.Lock()
+	defer m.credentialMu.Unlock()
+	return m.saveCredential(ctx, credential)
+}
+
+// saveCredential persists a credential while credentialMu is held.
+func (m *Manager) saveCredential(ctx context.Context, credential Credential) error {
 	if credential.AccountID == "" || credential.AccessToken == "" {
 		return fmt.Errorf("Codex credential is missing account_id or access_token")
 	}

@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -75,6 +76,97 @@ func TestApplyCodexHeadersAlwaysCloaksIdentity(t *testing.T) {
 	}
 	if got := req.Header.Get("Chatgpt-Account-Id"); got != "acct" {
 		t.Fatalf("Chatgpt-Account-Id = %q", got)
+	}
+	if got := req.Header.Get("Connection"); got != "" {
+		t.Fatalf("hop-by-hop Connection header = %q", got)
+	}
+}
+
+func TestCredentialReplacementCannotBeOverwrittenByRefresh(t *testing.T) {
+	ctx := context.Background()
+	temp := t.TempDir()
+	cfg := config.Config{
+		StorageDriver: "sqlite",
+		SQLitePath:    filepath.Join(temp, "codexone.db"),
+		MasterKeyFile: filepath.Join(temp, "master.key"),
+	}
+	database, err := store.Open(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	sessions, err := session.New(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sessions.Close()
+	cipher, err := cryptox.New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(cfg, database, cipher, sessions, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	oldAuth := []byte(`{"access_token":"old-access","refresh_token":"old-refresh","account_id":"acct_old","email":"old@example.com","expires_at":1}`)
+	if _, err = manager.ImportAuthJSON(ctx, oldAuth); err != nil {
+		t.Fatal(err)
+	}
+
+	refreshStarted := make(chan struct{})
+	releaseRefresh := make(chan struct{})
+	var once sync.Once
+	oldIDToken := testJWT(t, map[string]any{
+		"email": "old@example.com",
+		"exp":   time.Now().Add(time.Hour).Unix(),
+		"https://api.openai.com/auth": map[string]any{
+			"chatgpt_account_id": "acct_old",
+			"chatgpt_plan_type":  "plus",
+		},
+	})
+	manager.client = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		once.Do(func() { close(refreshStarted) })
+		<-releaseRefresh
+		body, _ := json.Marshal(map[string]any{
+			"access_token": "refreshed-old-access", "refresh_token": "refreshed-old-refresh",
+			"id_token": oldIDToken, "expires_in": 3600,
+		})
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(string(body))), Request: request}, nil
+	})}
+
+	refreshResult := make(chan error, 1)
+	go func() {
+		_, refreshErr := manager.FreshCredential(ctx)
+		refreshResult <- refreshErr
+	}()
+	<-refreshStarted
+
+	replacementResult := make(chan error, 1)
+	replacementStarted := make(chan struct{})
+	newAuth := []byte(`{"access_token":"new-access","refresh_token":"new-refresh","account_id":"acct_new","email":"new@example.com","expires_at":4102444800}`)
+	go func() {
+		close(replacementStarted)
+		_, replaceErr := manager.ImportAuthJSON(ctx, newAuth)
+		replacementResult <- replaceErr
+	}()
+	<-replacementStarted
+	select {
+	case replaceErr := <-replacementResult:
+		t.Fatalf("credential replacement bypassed an in-flight refresh: %v", replaceErr)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseRefresh)
+	if err = <-refreshResult; err != nil {
+		t.Fatalf("refresh credential: %v", err)
+	}
+	if err = <-replacementResult; err != nil {
+		t.Fatalf("replace credential: %v", err)
+	}
+	credential, err := manager.Credential(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if credential.AccountID != "acct_new" || credential.AccessToken != "new-access" {
+		t.Fatalf("final credential = %#v", credential)
 	}
 }
 
