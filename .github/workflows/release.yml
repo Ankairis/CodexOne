@@ -100,25 +100,56 @@ jobs:
 
           (cd dist && sha256sum ./*.tar.gz ./*.zip > SHA256SUMS)
 
-      - name: Publish GitHub release
+      - name: Create or resume draft release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          options=(
-            "$RELEASE_TAG"
-            dist/*
-            --repo "$GITHUB_REPOSITORY"
-            --target "$GITHUB_SHA"
-            --title "CodexOne $RELEASE_TAG"
-            --generate-notes
-            --fail-on-no-commits
-          )
-          if [[ "$PRERELEASE" == "true" ]]; then
-            options+=(--prerelease)
+
+          if tag_commit="$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha 2>/dev/null)"; then
+            if [[ "$tag_commit" != "$GITHUB_SHA" ]]; then
+              echo "Tag $RELEASE_TAG points to $tag_commit, not this workflow commit $GITHUB_SHA" >&2
+              exit 1
+            fi
           fi
-          gh release create "${options[@]}"
+
+          if release_state="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null)"; then
+            if [[ "$release_state" == "false" ]]; then
+              echo "Release $RELEASE_TAG is already published; leaving it unchanged."
+              exit 0
+            fi
+            echo "Resuming existing draft release $RELEASE_TAG"
+          else
+            create_options=(
+              "$RELEASE_TAG"
+              --repo "$GITHUB_REPOSITORY"
+              --target "$GITHUB_SHA"
+              --title "CodexOne $RELEASE_TAG"
+              --generate-notes
+              --fail-on-no-commits
+              --draft
+            )
+            if [[ "$PRERELEASE" == "true" ]]; then
+              create_options+=(--prerelease)
+            fi
+            gh release create "${create_options[@]}"
+          fi
+
+          assets=(dist/*)
+          if [[ "${#assets[@]}" -ne 6 ]]; then
+            echo "Expected 6 release assets, found ${#assets[@]}" >&2
+            exit 1
+          fi
+          gh release upload "$RELEASE_TAG" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+
+          publish_options=("$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false)
+          if [[ "$PRERELEASE" == "true" ]]; then
+            publish_options+=(--prerelease)
+          else
+            publish_options+=(--prerelease=false)
+          fi
+          gh release edit "${publish_options[@]}"
 
       - name: Add release link to summary
         env:

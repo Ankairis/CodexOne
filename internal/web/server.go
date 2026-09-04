@@ -109,7 +109,17 @@ func New(cfg config.Config, database *store.Store, sessions session.Store, codex
 	return router
 }
 
-func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) health(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	if err := s.database.Ping(ctx); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "database_unavailable", "database health check failed")
+		return
+	}
+	if err := s.sessions.Ping(ctx); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "session_store_unavailable", "session storage health check failed")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "service": "codexone"})
 }
 

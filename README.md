@@ -88,6 +88,8 @@ https://xxx.xxx.com/v1
 
 Caddy 配置已关闭反向代理响应缓冲，以便 SSE 实时输出。若使用 Nginx，也要为 `/v1` 关闭 buffering。
 
+Docker 镜像自带 `/healthz` 健康检查，会验证应用、数据库和会话存储；请求元数据会在启动时及其后每 24 小时按保留期清理一次。
+
 ## 客户端调用
 
 ```bash

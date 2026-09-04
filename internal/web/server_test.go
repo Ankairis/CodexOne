@@ -266,6 +266,12 @@ func TestAPIKeyDatabaseFailureIsNotReportedAsInvalidKey(t *testing.T) {
 	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"code":"database_unavailable"`) {
 		t.Fatalf("database failure status = %d, body = %s", response.Code, response.Body.String())
 	}
+
+	health := httptest.NewRecorder()
+	handler.ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if health.Code != http.StatusServiceUnavailable || !strings.Contains(health.Body.String(), `"code":"database_unavailable"`) {
+		t.Fatalf("health status = %d, body = %s", health.Code, health.Body.String())
+	}
 }
 
 func TestEnsureAdminPasswordGeneratesOnlyOnce(t *testing.T) {

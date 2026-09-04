@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -70,12 +71,19 @@ func run() error {
 		IdleTimeout:       2 * time.Minute,
 	}
 
-	retentionBefore := time.Now().AddDate(0, 0, -cfg.RequestRetentionDays).UnixMilli()
-	if count, cleanupErr := database.DeleteOldRequestLogs(ctx, retentionBefore); cleanupErr != nil {
-		logger.Warn("request log cleanup failed", "error", cleanupErr)
-	} else if count > 0 {
-		logger.Info("old request logs removed", "count", count)
-	}
+	cleanupRequestLogs(ctx, database, cfg.RequestRetentionDays, time.Now(), logger)
+	cleanupCtx, stopCleanup := context.WithCancel(context.Background())
+	cleanupTicker := time.NewTicker(24 * time.Hour)
+	cleanupDone := make(chan struct{})
+	go func() {
+		defer close(cleanupDone)
+		runRequestLogCleanup(cleanupCtx, database, cfg.RequestRetentionDays, cleanupTicker.C, logger)
+	}()
+	defer func() {
+		cleanupTicker.Stop()
+		stopCleanup()
+		<-cleanupDone
+	}()
 
 	serverErrors := make(chan error, 1)
 	go func() {
@@ -97,4 +105,35 @@ func run() error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	return server.Shutdown(shutdownCtx)
+}
+
+type requestLogCleaner interface {
+	DeleteOldRequestLogs(context.Context, int64) (int64, error)
+}
+
+func runRequestLogCleanup(ctx context.Context, database requestLogCleaner, retentionDays int, ticks <-chan time.Time, logger *slog.Logger) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now, ok := <-ticks:
+			if !ok {
+				return
+			}
+			cleanupRequestLogs(ctx, database, retentionDays, now, logger)
+		}
+	}
+}
+
+func cleanupRequestLogs(ctx context.Context, database requestLogCleaner, retentionDays int, now time.Time, logger *slog.Logger) {
+	cleanupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	retentionBefore := now.AddDate(0, 0, -retentionDays).UnixMilli()
+	if count, err := database.DeleteOldRequestLogs(cleanupCtx, retentionBefore); err != nil {
+		if !errors.Is(err, context.Canceled) {
+			logger.Warn("request log cleanup failed", "error", err)
+		}
+	} else if count > 0 {
+		logger.Info("old request logs removed", "count", count)
+	}
 }

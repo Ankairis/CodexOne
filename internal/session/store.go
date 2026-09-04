@@ -17,6 +17,7 @@ type Store interface {
 	Put(context.Context, string, string, time.Duration) error
 	Get(context.Context, string) (string, error)
 	Delete(context.Context, string) error
+	Ping(context.Context) error
 	Close() error
 }
 
@@ -84,6 +85,8 @@ func (s *memoryStore) Delete(_ context.Context, key string) error {
 
 func (s *memoryStore) Close() error { return nil }
 
+func (s *memoryStore) Ping(context.Context) error { return nil }
+
 type redisStore struct {
 	client *redis.Client
 	prefix string
@@ -104,5 +107,7 @@ func (s *redisStore) Get(ctx context.Context, key string) (string, error) {
 func (s *redisStore) Delete(ctx context.Context, key string) error {
 	return s.client.Del(ctx, s.prefix+key).Err()
 }
+
+func (s *redisStore) Ping(ctx context.Context) error { return s.client.Ping(ctx).Err() }
 
 func (s *redisStore) Close() error { return s.client.Close() }
