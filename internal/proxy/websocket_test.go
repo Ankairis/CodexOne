@@ -117,6 +117,56 @@ func TestWebSocketConversationRequiresPendingToolOutputs(t *testing.T) {
 	}
 }
 
+func TestWebSocketConversationCarriesToolsIntoAppend(t *testing.T) {
+	request := httptest.NewRequest("GET", "/v1/responses", nil)
+	request = request.WithContext(WithAPIKey(request.Context(), store.APIKey{ID: "key_ws"}))
+	conversation := webSocketConversation{}
+	first, err := conversation.prepare(request, []byte(`{
+		"type":"response.create",
+		"model":"gpt-test",
+		"input":"hello",
+		"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],
+		"tool_choice":"required",
+		"parallel_tool_calls":true
+	}`), false, "free")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = conversation.commit(first, []byte(`{"type":"response.completed","response":{"id":"resp_first","output":[{"type":"message","id":"msg_first","role":"assistant","content":[]}]}}`), 1); err != nil {
+		t.Fatal(err)
+	}
+	second, err := conversation.prepare(request, []byte(`{"type":"response.append","input":[{"type":"message","role":"user","content":"again"}]}`), false, "free")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Tools             []json.RawMessage `json:"tools"`
+		ToolChoice        string            `json:"tool_choice"`
+		ParallelToolCalls bool              `json:"parallel_tool_calls"`
+	}
+	if err = json.Unmarshal(second.incremental, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Tools) != 1 || payload.ToolChoice != "required" || !payload.ParallelToolCalls {
+		t.Fatalf("append lost tool settings: %s", second.incremental)
+	}
+}
+
+func TestMergeWebSocketBetaHeaderReplacesStaleVersion(t *testing.T) {
+	tests := map[string]string{
+		"":                                codexResponsesWebSocketBeta,
+		"foo=bar":                         "foo=bar," + codexResponsesWebSocketBeta,
+		"responses_websockets=2025-01-01": codexResponsesWebSocketBeta,
+		"foo=bar, responses_websockets=2025-01-01,other=baz": "foo=bar," + codexResponsesWebSocketBeta + ",other=baz",
+		codexResponsesWebSocketBeta:                          codexResponsesWebSocketBeta,
+	}
+	for input, want := range tests {
+		if got := mergeWebSocketBetaHeader(input); got != want {
+			t.Errorf("mergeWebSocketBetaHeader(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
 func TestMergeWebSocketItemsDeduplicatesIDsAndToolCalls(t *testing.T) {
 	items := mergeWebSocketItems(
 		[]json.RawMessage{json.RawMessage(`{"type":"function_call","id":"fc_old","call_id":"call_1"}`), json.RawMessage(`{"type":"message","id":"same","role":"assistant","content":"old"}`)},

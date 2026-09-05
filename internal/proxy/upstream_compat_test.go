@@ -271,3 +271,31 @@ func TestSanitizeCodexOverlongCanonicalIDIsReversible(t *testing.T) {
 		t.Fatalf("restored overlong item ID = %s", exposed)
 	}
 }
+
+func TestSanitizeCodexInputIDWithoutRemapUsesCanonicalForm(t *testing.T) {
+	ctx := WithAPIKey(context.Background(), store.APIKey{ID: "key_plain"})
+	body := []byte(`{"model":"gpt-test","input":[{"type":"message","id":"tenant/item-42","role":"user","content":"hello"}]}`)
+	prepared, identity, err := prepareRequestIdentity(ctx, nil, body, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err = prepareCodexHTTPBody(prepared, "gpt-test", "free", nil, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request struct {
+		Input []struct {
+			ID string `json:"id"`
+		} `json:"input"`
+	}
+	if err = json.Unmarshal(prepared, &request); err != nil {
+		t.Fatal(err)
+	}
+	if len(request.Input) != 1 || request.Input[0].ID != "msg_tenant/item-42" {
+		t.Fatalf("canonical item ID = %#v", request.Input)
+	}
+	exposed := identity.exposePayload([]byte(`{"item_id":"msg_tenant/item-42"}`))
+	if string(exposed) != `{"item_id":"tenant/item-42"}` {
+		t.Fatalf("restored canonical item ID = %s", exposed)
+	}
+}

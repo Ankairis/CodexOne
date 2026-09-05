@@ -14,6 +14,7 @@ type webSocketConversation struct {
 	identity       *codexIdentity
 	model          string
 	instructions   json.RawMessage
+	turnSettings   map[string]json.RawMessage
 	history        []json.RawMessage
 	lastResponseID string
 	lastGeneration uint64
@@ -92,6 +93,17 @@ func (c *webSocketConversation) prepare(r *http.Request, raw []byte, remap bool,
 		}
 		if previousResponseID == "" {
 			object["previous_response_id"] = c.lastResponseID
+		}
+		for _, name := range webSocketContinuationFields {
+			if _, exists := object[name]; exists {
+				continue
+			}
+			if raw := c.turnSettings[name]; len(raw) > 0 {
+				var value any
+				if json.Unmarshal(raw, &value) == nil {
+					object[name] = value
+				}
+			}
 		}
 	}
 	object["type"] = "response.create"
@@ -214,6 +226,20 @@ func (c *webSocketConversation) commit(plan webSocketTurnPlan, terminal []byte, 
 	c.hasCompleted = true
 
 	requestObject, _ := decodeJSONObject(plan.incremental)
+	if plan.reset {
+		c.turnSettings = nil
+	}
+	for _, name := range webSocketContinuationFields {
+		if value, exists := requestObject[name]; exists {
+			encoded, encodeErr := json.Marshal(value)
+			if encodeErr == nil {
+				if c.turnSettings == nil {
+					c.turnSettings = make(map[string]json.RawMessage)
+				}
+				c.turnSettings[name] = encoded
+			}
+		}
+	}
 	if raw, exists := requestObject["instructions"]; exists {
 		if encoded, err := json.Marshal(raw); err == nil {
 			c.instructions = encoded
@@ -223,6 +249,8 @@ func (c *webSocketConversation) commit(plan webSocketTurnPlan, terminal []byte, 
 	}
 	return nil
 }
+
+var webSocketContinuationFields = []string{"tools", "tool_choice", "parallel_tool_calls"}
 
 func (c *webSocketConversation) replayLimit() int64 {
 	if c != nil && c.maxReplayBytes > 0 {

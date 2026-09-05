@@ -35,11 +35,12 @@ type codexIdentity struct {
 	clientSessionID   string
 	upstreamSessionID string
 
-	mu           sync.RWMutex
-	reverse      map[string]string
-	mappingBytes int
-	mappingErr   error
-	matcher      *regexp.Regexp
+	mu            sync.RWMutex
+	reverse       map[string]string
+	mappingBytes  int
+	mappingErr    error
+	matcher       *regexp.Regexp
+	matcherValues map[string]string
 }
 
 // prepareRequestIdentity makes the prompt cache key and transport session
@@ -292,6 +293,7 @@ func (i *codexIdentity) remember(upstream, client string) {
 	i.reverse[upstream] = client
 	i.mappingBytes += addedBytes
 	i.matcher = nil
+	i.matcherValues = nil
 }
 
 func (i *codexIdentity) mappingError() error {
@@ -315,12 +317,19 @@ func (i *codexIdentity) exposePayload(payload []byte) []byte {
 	if len(i.reverse) == 0 {
 		return payload
 	}
-	keys := make([]string, 0, len(i.reverse))
-	for key := range i.reverse {
-		keys = append(keys, key)
-	}
-	sort.Slice(keys, func(a, b int) bool { return len(keys[a]) > len(keys[b]) })
 	if i.matcher == nil {
+		keys := make([]string, 0, len(i.reverse))
+		i.matcherValues = make(map[string]string, len(i.reverse))
+		for upstream, client := range i.reverse {
+			encoded, err := json.Marshal(upstream)
+			if err != nil || len(encoded) < 2 {
+				continue
+			}
+			key := string(encoded[1 : len(encoded)-1])
+			keys = append(keys, key)
+			i.matcherValues[key] = client
+		}
+		sort.Slice(keys, func(a, b int) bool { return len(keys[a]) > len(keys[b]) })
 		patterns := make([]string, len(keys))
 		for index, key := range keys {
 			patterns[index] = regexp.QuoteMeta(key)
@@ -341,7 +350,7 @@ func (i *codexIdentity) exposePayload(payload []byte) []byte {
 	for match != nil {
 		matchStart, matchEnd := start+match[0], start+match[1]
 		out = append(out, payload[start:matchStart]...)
-		client := i.reverse[string(payload[matchStart:matchEnd])]
+		client := i.matcherValues[string(payload[matchStart:matchEnd])]
 		encoded, err := json.Marshal(client)
 		if err != nil || len(encoded) < 2 {
 			out = append(out, payload[matchStart:matchEnd]...)

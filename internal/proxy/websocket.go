@@ -786,16 +786,26 @@ func codexWebSocketURL(raw string) (string, error) {
 }
 
 func mergeWebSocketBetaHeader(clientValue string) string {
-	clientValue = strings.TrimSpace(clientValue)
-	if clientValue == "" {
-		return codexResponsesWebSocketBeta
-	}
+	values := make([]string, 0, 4)
+	found := false
 	for _, value := range strings.Split(clientValue, ",") {
-		if strings.HasPrefix(strings.TrimSpace(value), "responses_websockets=") {
-			return clientValue
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
 		}
+		if strings.HasPrefix(strings.ToLower(value), "responses_websockets=") {
+			if !found {
+				values = append(values, codexResponsesWebSocketBeta)
+				found = true
+			}
+			continue
+		}
+		values = append(values, value)
 	}
-	return clientValue + "," + codexResponsesWebSocketBeta
+	if !found {
+		values = append(values, codexResponsesWebSocketBeta)
+	}
+	return strings.Join(values, ",")
 }
 
 func normalizeWebSocketTerminal(payload []byte) []byte {

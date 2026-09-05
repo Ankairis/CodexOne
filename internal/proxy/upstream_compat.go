@@ -208,7 +208,7 @@ func sanitizeCodexInputItems(object map[string]any, identities ...*codexIdentity
 		itemID, _ := item["id"].(string)
 		if itemID != "" {
 			normalized := canonicalCodexInputItemID(item, itemID)
-			if identity != nil && (normalized != itemID || len([]rune(normalized)) > codexInputItemIDLimit) {
+			if identity != nil && identity.remap && (normalized != itemID || len([]rune(normalized)) > codexInputItemIDLimit) {
 				normalized = mappedCodexInputItemID(identity, item, itemID)
 			}
 			if _, collides := reserved[normalized]; collides && normalized != itemID {

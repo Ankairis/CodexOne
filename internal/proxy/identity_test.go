@@ -150,20 +150,24 @@ func TestWebSocketIdentityRejectsSessionChange(t *testing.T) {
 }
 
 func TestExposePayloadEscapesRestoredIdentityForJSON(t *testing.T) {
-	upstreamID := "3b5b6900-5e7a-5eb8-a62a-96e79b4f9e31"
+	upstreamID := "msg_upstream-\"quote\\slash"
 	clientID := "client-\"quote\\slash\ttab"
 	identity := &codexIdentity{
 		remap:   true,
 		reverse: map[string]string{upstreamID: clientID},
 	}
-	exposed := identity.exposePayload([]byte(`{"id":"prefix-` + upstreamID + `-suffix"}`))
+	payload, err := json.Marshal(map[string]string{"id": "prefix-" + upstreamID + "-suffix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exposed := identity.exposePayload(payload)
 	if !json.Valid(exposed) {
 		t.Fatalf("restored payload is invalid JSON: %s", exposed)
 	}
 	var decoded struct {
 		ID string `json:"id"`
 	}
-	if err := json.Unmarshal(exposed, &decoded); err != nil {
+	if err = json.Unmarshal(exposed, &decoded); err != nil {
 		t.Fatal(err)
 	}
 	if decoded.ID != "prefix-"+clientID+"-suffix" {
