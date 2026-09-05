@@ -232,6 +232,15 @@ func TestMergeWebSocketBetaHeaderReplacesStaleVersion(t *testing.T) {
 	}
 }
 
+func TestWebSocketCompressionIsDisabledForBoundedReads(t *testing.T) {
+	if responsesWebSocketUpgrader.EnableCompression {
+		t.Fatal("downstream WebSocket compression bypasses the decompressed message limit")
+	}
+	if newCodexWebSocketDialer().EnableCompression {
+		t.Fatal("upstream WebSocket compression bypasses the decompressed message limit")
+	}
+}
+
 func TestMergeWebSocketItemsDeduplicatesIDsAndToolCalls(t *testing.T) {
 	items := mergeWebSocketItems(
 		[]json.RawMessage{json.RawMessage(`{"type":"function_call","id":"fc_old","call_id":"call_1"}`), json.RawMessage(`{"type":"message","id":"same","role":"assistant","content":"old"}`)},

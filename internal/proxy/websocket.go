@@ -39,7 +39,7 @@ const (
 var responsesWebSocketUpgrader = websocket.Upgrader{
 	ReadBufferSize:    32 << 10,
 	WriteBufferSize:   32 << 10,
-	EnableCompression: true,
+	EnableCompression: false,
 	CheckOrigin: func(*http.Request) bool {
 		// The same API-key middleware as HTTP Responses authenticates this route.
 		return true
@@ -394,11 +394,7 @@ func (s *responsesWebSocketSession) ensureUpstream(ctx context.Context, identity
 	s.service.auth.ApplyCodexHeaders(headerRequest, credential, "application/json")
 	headers.Set("OpenAI-Beta", mergeWebSocketBetaHeader(s.request.Header.Get("OpenAI-Beta")))
 
-	dialer := websocket.Dialer{
-		Proxy:             http.ProxyFromEnvironment,
-		HandshakeTimeout:  webSocketHandshakeTimeout,
-		EnableCompression: true,
-	}
+	dialer := newCodexWebSocketDialer()
 	connection, handshake, err := dialer.DialContext(ctx, upstreamURL, headers)
 	if err != nil {
 		failure := upstreamDialFailure{status: http.StatusBadGateway, message: err.Error()}
@@ -419,6 +415,14 @@ func (s *responsesWebSocketSession) ensureUpstream(ctx context.Context, identity
 	s.upstream = newUpstreamWebSocket(connection, s.nextGeneration, credential.AccountID)
 	s.webSocketRetryAt = time.Time{}
 	return s.upstream, upstreamDialFailure{}
+}
+
+func newCodexWebSocketDialer() websocket.Dialer {
+	return websocket.Dialer{
+		Proxy:             http.ProxyFromEnvironment,
+		HandshakeTimeout:  webSocketHandshakeTimeout,
+		EnableCompression: false,
+	}
 }
 
 func (s *responsesWebSocketSession) invalidateUpstream() {
