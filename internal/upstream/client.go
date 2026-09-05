@@ -88,10 +88,7 @@ func (t *chromeRoundTripper) RoundTrip(request *http.Request) (*http.Response, e
 	}()
 
 	tlsConnection := tls.UClient(rawConnection, &tls.Config{ServerName: hostname}, tls.HelloChrome_Auto)
-	handshakeTimeout := t.handshakeTimeout
-	if handshakeTimeout <= 0 {
-		handshakeTimeout = chromeTLSHandshakeTimeout
-	}
+	handshakeTimeout := t.effectiveHandshakeTimeout()
 	handshakeDeadline := time.Now().Add(handshakeTimeout)
 	if contextDeadline, ok := request.Context().Deadline(); ok && contextDeadline.Before(handshakeDeadline) {
 		handshakeDeadline = contextDeadline
@@ -134,6 +131,13 @@ func (t *chromeRoundTripper) RoundTrip(request *http.Request) (*http.Response, e
 	return response, nil
 }
 
+func (t *chromeRoundTripper) effectiveHandshakeTimeout() time.Duration {
+	if t != nil && t.handshakeTimeout > 0 {
+		return t.handshakeTimeout
+	}
+	return chromeTLSHandshakeTimeout
+}
+
 func (t *chromeRoundTripper) dialConnection(request *http.Request, address string) (net.Conn, error) {
 	direct := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
 	proxyResolver := t.proxy
@@ -150,7 +154,7 @@ func (t *chromeRoundTripper) dialConnection(request *http.Request, address strin
 
 	switch strings.ToLower(proxyURL.Scheme) {
 	case "http", "https":
-		return dialHTTPConnectProxy(request.Context(), direct, proxyURL, address)
+		return dialHTTPConnectProxy(request.Context(), direct, proxyURL, address, t.effectiveHandshakeTimeout())
 	case "socks5", "socks5h":
 		proxyDialer, proxyErr := proxy.FromURL(proxyURL, direct)
 		if proxyErr != nil {
@@ -166,7 +170,7 @@ func (t *chromeRoundTripper) dialConnection(request *http.Request, address strin
 	}
 }
 
-func dialHTTPConnectProxy(ctx context.Context, dialer *net.Dialer, proxyURL *url.URL, address string) (net.Conn, error) {
+func dialHTTPConnectProxy(ctx context.Context, dialer *net.Dialer, proxyURL *url.URL, address string, tlsHandshakeTimeout time.Duration) (net.Conn, error) {
 	proxyAddress := proxyURL.Host
 	if _, _, err := net.SplitHostPort(proxyAddress); err != nil {
 		port := "80"
@@ -190,11 +194,21 @@ func dialHTTPConnectProxy(ctx context.Context, dialer *net.Dialer, proxyURL *url
 	})
 	defer stopCancellation()
 	if strings.EqualFold(proxyURL.Scheme, "https") {
+		deadline := time.Now().Add(tlsHandshakeTimeout)
+		if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
+			deadline = contextDeadline
+		}
+		if err = connection.SetDeadline(deadline); err != nil {
+			return nil, fmt.Errorf("set ChatGPT upstream proxy TLS deadline: %w", err)
+		}
 		tlsConnection := standardtls.Client(connection, &standardtls.Config{ServerName: proxyURL.Hostname(), MinVersion: standardtls.VersionTLS12})
 		if err = tlsConnection.HandshakeContext(ctx); err != nil {
 			return nil, fmt.Errorf("handshake with ChatGPT upstream proxy: %w", err)
 		}
 		connection = tlsConnection
+		if err = connection.SetDeadline(time.Time{}); err != nil {
+			return nil, fmt.Errorf("clear ChatGPT upstream proxy TLS deadline: %w", err)
+		}
 	}
 
 	connectRequest := &http.Request{

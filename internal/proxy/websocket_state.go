@@ -24,15 +24,16 @@ type webSocketConversation struct {
 }
 
 type webSocketTurnPlan struct {
-	model        string
-	reasoning    string
-	incremental  []byte
-	replay       []byte
-	currentInput []json.RawMessage
-	reset        bool
-	continuation bool
-	identity     *codexIdentity
-	turnSettings map[string]json.RawMessage
+	model           string
+	reasoning       string
+	incremental     []byte
+	replay          []byte
+	currentInput    []json.RawMessage
+	reset           bool
+	continuation    bool
+	identity        *codexIdentity
+	turnSettings    map[string]json.RawMessage
+	instructionsSet bool
 }
 
 func (c *webSocketConversation) prepare(r *http.Request, raw []byte, remap bool, planTypes ...string) (webSocketTurnPlan, error) {
@@ -43,6 +44,7 @@ func (c *webSocketConversation) prepare(r *http.Request, raw []byte, remap bool,
 	if err != nil {
 		return webSocketTurnPlan{}, err
 	}
+	_, instructionsSet := object["instructions"]
 	requestType := jsonString(object["type"])
 	if requestType != "response.create" && requestType != "response.append" {
 		return webSocketTurnPlan{}, fmt.Errorf("unsupported WebSocket request type %q", requestType)
@@ -171,15 +173,16 @@ func (c *webSocketConversation) prepare(r *http.Request, raw []byte, remap bool,
 	}
 
 	return webSocketTurnPlan{
-		model:        model,
-		reasoning:    reasoningEffortFromBody(normalized),
-		incremental:  incremental,
-		replay:       replay,
-		currentInput: currentInput,
-		reset:        reset,
-		continuation: continuation,
-		identity:     identity,
-		turnSettings: turnSettings,
+		model:           model,
+		reasoning:       reasoningEffortFromBody(normalized),
+		incremental:     incremental,
+		replay:          replay,
+		currentInput:    currentInput,
+		reset:           reset,
+		continuation:    continuation,
+		identity:        identity,
+		turnSettings:    turnSettings,
+		instructionsSet: instructionsSet,
 	}, nil
 }
 
@@ -241,21 +244,20 @@ func (c *webSocketConversation) commit(plan webSocketTurnPlan, terminal []byte, 
 		c.turnSettings[name] = bytes.Clone(raw)
 	}
 	requestObject, _ := decodeJSONObject(plan.incremental)
-	if plan.reset {
+	if plan.reset || plan.instructionsSet {
 		c.instructions = nil
 	}
-	instructionsStored := false
-	if raw, exists := requestObject["instructions"]; exists {
+	if plan.instructionsSet {
+		raw := requestObject["instructions"]
 		text, isString := raw.(string)
 		if !isString || strings.TrimSpace(text) != "" {
 			encoded, encodeErr := json.Marshal(raw)
 			if encodeErr == nil {
 				c.instructions = encoded
-				instructionsStored = true
 			}
 		}
 	}
-	if !instructionsStored && len(event.Response.Instructions) > 0 {
+	if plan.reset && !plan.instructionsSet && len(event.Response.Instructions) > 0 {
 		var value any
 		if json.Unmarshal(event.Response.Instructions, &value) == nil {
 			text, isString := value.(string)
