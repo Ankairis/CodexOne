@@ -20,6 +20,8 @@ import (
 	"golang.org/x/net/proxy"
 )
 
+const chromeTLSHandshakeTimeout = 10 * time.Second
+
 // NewHTTPClient returns the shared outbound client policy used for OpenAI
 // authentication, quota, model, and inference requests. When chromeTLS is
 // enabled, only the official ChatGPT HTTPS host uses a Chrome-style TLS
@@ -28,7 +30,10 @@ func NewHTTPClient(timeout time.Duration, chromeTLS bool) *http.Client {
 	transport := http.RoundTripper(http.DefaultTransport)
 	if chromeTLS {
 		transport = &selectiveRoundTripper{
-			chrome:   &chromeRoundTripper{proxy: http.ProxyFromEnvironment},
+			chrome: &chromeRoundTripper{
+				proxy:            http.ProxyFromEnvironment,
+				handshakeTimeout: chromeTLSHandshakeTimeout,
+			},
 			fallback: http.DefaultTransport,
 		}
 	}
@@ -60,7 +65,8 @@ func isChatGPTHTTPS(request *http.Request) bool {
 // A dedicated connection keeps cancellation and streaming ownership simple and
 // avoids mixing the special transport with requests for any other host.
 type chromeRoundTripper struct {
-	proxy func(*http.Request) (*url.URL, error)
+	proxy            func(*http.Request) (*url.URL, error)
+	handshakeTimeout time.Duration
 }
 
 func (t *chromeRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
@@ -82,8 +88,22 @@ func (t *chromeRoundTripper) RoundTrip(request *http.Request) (*http.Response, e
 	}()
 
 	tlsConnection := tls.UClient(rawConnection, &tls.Config{ServerName: hostname}, tls.HelloChrome_Auto)
+	handshakeTimeout := t.handshakeTimeout
+	if handshakeTimeout <= 0 {
+		handshakeTimeout = chromeTLSHandshakeTimeout
+	}
+	handshakeDeadline := time.Now().Add(handshakeTimeout)
+	if contextDeadline, ok := request.Context().Deadline(); ok && contextDeadline.Before(handshakeDeadline) {
+		handshakeDeadline = contextDeadline
+	}
+	if err = rawConnection.SetDeadline(handshakeDeadline); err != nil {
+		return nil, fmt.Errorf("set ChatGPT TLS handshake deadline: %w", err)
+	}
 	if err = tlsConnection.HandshakeContext(request.Context()); err != nil {
 		return nil, fmt.Errorf("handshake with ChatGPT upstream: %w", err)
+	}
+	if err = rawConnection.SetDeadline(time.Time{}); err != nil {
+		return nil, fmt.Errorf("clear ChatGPT TLS handshake deadline: %w", err)
 	}
 	if protocol := tlsConnection.ConnectionState().NegotiatedProtocol; protocol != "h2" {
 		return nil, fmt.Errorf("ChatGPT upstream negotiated unsupported protocol %q", protocol)

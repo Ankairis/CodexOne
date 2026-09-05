@@ -146,6 +146,49 @@ func TestChromeRoundTripperCancelsStalledProxyConnect(t *testing.T) {
 	}
 }
 
+func TestChromeRoundTripperBoundsTLSHandshake(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	release := make(chan struct{})
+	defer close(release)
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer connection.Close()
+		request, readErr := http.ReadRequest(bufio.NewReader(connection))
+		if readErr != nil || request.Method != http.MethodConnect {
+			return
+		}
+		_, _ = io.WriteString(connection, "HTTP/1.1 200 Connection Established\r\n\r\n")
+		<-release
+	}()
+
+	proxyURL, err := url.Parse("http://" + listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := &chromeRoundTripper{
+		proxy:            func(*http.Request) (*url.URL, error) { return proxyURL, nil },
+		handshakeTimeout: 100 * time.Millisecond,
+	}
+	request, err := http.NewRequest(http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	if _, err = transport.RoundTrip(request); err == nil || !strings.Contains(err.Error(), "handshake") {
+		t.Fatalf("stalled TLS handshake error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("stalled TLS handshake took %s", elapsed)
+	}
+}
+
 func TestSelectiveRoundTripperUsesChromeOnlyForExactChatGPTHost(t *testing.T) {
 	var selected string
 	response := func() *http.Response {

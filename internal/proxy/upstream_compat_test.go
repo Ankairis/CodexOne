@@ -299,3 +299,34 @@ func TestSanitizeCodexInputIDWithoutRemapUsesCanonicalForm(t *testing.T) {
 		t.Fatalf("restored canonical item ID = %s", exposed)
 	}
 }
+
+func TestPrepareCodexPassthroughBodyOnlyNormalizesItemIDs(t *testing.T) {
+	ctx := WithAPIKey(context.Background(), store.APIKey{ID: "key_private"})
+	body := []byte(`{"model":"gpt-test","previous_response_id":"resp_keep","input":[{"type":"message","id":"tenant/item-42","role":"user","content":"hello"}]}`)
+	prepared, identity, err := prepareRequestIdentity(ctx, nil, body, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err = prepareCodexPassthroughBody(prepared, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request map[string]any
+	if err = json.Unmarshal(prepared, &request); err != nil {
+		t.Fatal(err)
+	}
+	if request["previous_response_id"] != "resp_keep" {
+		t.Fatalf("passthrough state was changed: %s", prepared)
+	}
+	if _, exists := request["tools"]; exists {
+		t.Fatalf("passthrough request gained tools: %s", prepared)
+	}
+	item := request["input"].([]any)[0].(map[string]any)
+	mappedID, _ := item["id"].(string)
+	if !strings.HasPrefix(mappedID, "msg_") || strings.Contains(mappedID, "tenant") {
+		t.Fatalf("passthrough item ID = %q", mappedID)
+	}
+	if exposed := identity.exposePayload([]byte(`{"item_id":"` + mappedID + `"}`)); string(exposed) != `{"item_id":"tenant/item-42"}` {
+		t.Fatalf("restored passthrough ID = %s", exposed)
+	}
+}

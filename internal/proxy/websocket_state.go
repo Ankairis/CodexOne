@@ -241,12 +241,28 @@ func (c *webSocketConversation) commit(plan webSocketTurnPlan, terminal []byte, 
 		c.turnSettings[name] = bytes.Clone(raw)
 	}
 	requestObject, _ := decodeJSONObject(plan.incremental)
+	if plan.reset {
+		c.instructions = nil
+	}
+	instructionsStored := false
 	if raw, exists := requestObject["instructions"]; exists {
-		if encoded, err := json.Marshal(raw); err == nil {
-			c.instructions = encoded
+		text, isString := raw.(string)
+		if !isString || strings.TrimSpace(text) != "" {
+			encoded, encodeErr := json.Marshal(raw)
+			if encodeErr == nil {
+				c.instructions = encoded
+				instructionsStored = true
+			}
 		}
-	} else if len(event.Response.Instructions) > 0 {
-		c.instructions = bytes.Clone(event.Response.Instructions)
+	}
+	if !instructionsStored && len(event.Response.Instructions) > 0 {
+		var value any
+		if json.Unmarshal(event.Response.Instructions, &value) == nil {
+			text, isString := value.(string)
+			if !isString || strings.TrimSpace(text) != "" {
+				c.instructions = bytes.Clone(event.Response.Instructions)
+			}
+		}
 	}
 	return nil
 }

@@ -52,6 +52,21 @@ func prepareCodexWebSocketBody(body []byte, model, planType string, headers http
 	return encodeCodexObject(object)
 }
 
+func prepareCodexPassthroughBody(body []byte, identities ...*codexIdentity) ([]byte, error) {
+	object, err := decodeJSONObject(body)
+	if err != nil {
+		return nil, err
+	}
+	var identity *codexIdentity
+	if len(identities) > 0 {
+		identity = identities[0]
+	}
+	if err = sanitizeCodexInputItems(object, identity); err != nil {
+		return nil, err
+	}
+	return encodeCodexObject(object)
+}
+
 func prepareCodexInferenceObject(object map[string]any, model, planType string, headers http.Header, websocketTransport, includeImageTool bool, identities ...*codexIdentity) error {
 	if includeImageTool {
 		ensureCodexImageGenerationTool(object, model, planType, headers)

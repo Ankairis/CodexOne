@@ -217,6 +217,40 @@ func TestWebSocketConversationDoesNotRetainInjectedImageTool(t *testing.T) {
 	}
 }
 
+func TestWebSocketConversationClearsInstructionsOnReset(t *testing.T) {
+	request := httptest.NewRequest("GET", "/v1/responses", nil)
+	request = request.WithContext(WithAPIKey(request.Context(), store.APIKey{ID: "key_ws"}))
+	conversation := webSocketConversation{}
+	first, err := conversation.prepare(request, []byte(`{"type":"response.create","model":"gpt-test","instructions":"old instructions","input":"hello"}`), false, "free")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = conversation.commit(first, []byte(`{"type":"response.completed","response":{"id":"resp_first","output":[]}}`), 1); err != nil {
+		t.Fatal(err)
+	}
+	reset, err := conversation.prepare(request, []byte(`{"type":"response.create","model":"gpt-test","input":"new conversation"}`), false, "free")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = conversation.commit(reset, []byte(`{"type":"response.completed","response":{"id":"resp_reset","output":[]}}`), 1); err != nil {
+		t.Fatal(err)
+	}
+	if len(conversation.instructions) != 0 {
+		t.Fatalf("reset retained stale instructions: %s", conversation.instructions)
+	}
+	appendPlan, err := conversation.prepare(request, []byte(`{"type":"response.append","input":[{"type":"message","role":"user","content":"continue"}]}`), false, "free")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err = json.Unmarshal(appendPlan.incremental, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["instructions"] == "old instructions" {
+		t.Fatalf("append restored stale instructions: %s", appendPlan.incremental)
+	}
+}
+
 func TestMergeWebSocketBetaHeaderReplacesStaleVersion(t *testing.T) {
 	tests := map[string]string{
 		"":                                codexResponsesWebSocketBeta,

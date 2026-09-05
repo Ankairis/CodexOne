@@ -329,6 +329,12 @@ func (s *Service) handlePassthroughJSON(w http.ResponseWriter, r *http.Request, 
 		writeError(w, status, "invalid_request", errText, requestID)
 		return
 	}
+	body, err = prepareCodexPassthroughBody(body, identity)
+	if err != nil {
+		status, errText = http.StatusBadRequest, err.Error()
+		writeError(w, status, "invalid_request", errText, requestID)
+		return
+	}
 	credential, err := s.auth.FreshCredential(r.Context())
 	if err != nil {
 		status, errText = http.StatusServiceUnavailable, err.Error()
