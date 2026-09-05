@@ -152,6 +152,71 @@ func TestWebSocketConversationCarriesToolsIntoAppend(t *testing.T) {
 	}
 }
 
+func TestWebSocketAppendWithTranscriptItemsRemainsIncremental(t *testing.T) {
+	request := httptest.NewRequest("GET", "/v1/responses", nil)
+	request = request.WithContext(WithAPIKey(request.Context(), store.APIKey{ID: "key_ws"}))
+	conversation := webSocketConversation{}
+	first, err := conversation.prepare(request, []byte(`{"type":"response.create","model":"gpt-test","input":"hello"}`), false, "free")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = conversation.commit(first, []byte(`{"type":"response.completed","response":{"id":"resp_first","output":[{"type":"message","id":"msg_first","role":"assistant","content":[]}]}}`), 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = conversation.prepare(request, []byte(`{"type":"response.append","previous_response_id":"wrong","input":[{"type":"message","role":"assistant","content":[]}]}`), false, "free"); err == nil {
+		t.Fatal("assistant append bypassed previous_response_id validation")
+	}
+	appendPlan, err := conversation.prepare(request, []byte(`{"type":"response.append","input":[{"type":"message","role":"assistant","content":[]}]}`), false, "free")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !appendPlan.continuation || appendPlan.reset {
+		t.Fatalf("response.append was treated as a reset: %#v", appendPlan)
+	}
+	var payload struct {
+		PreviousResponseID string `json:"previous_response_id"`
+	}
+	if err = json.Unmarshal(appendPlan.incremental, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.PreviousResponseID != "resp_first" {
+		t.Fatalf("previous_response_id = %q", payload.PreviousResponseID)
+	}
+}
+
+func TestWebSocketConversationDoesNotRetainInjectedImageTool(t *testing.T) {
+	request := httptest.NewRequest("GET", "/v1/responses", nil)
+	request = request.WithContext(WithAPIKey(request.Context(), store.APIKey{ID: "key_ws"}))
+	conversation := webSocketConversation{}
+	first, err := conversation.prepare(request, []byte(`{"type":"response.create","model":"gpt-test","input":"hello"}`), false, "plus")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var paid struct {
+		Tools []json.RawMessage `json:"tools"`
+	}
+	if err = json.Unmarshal(first.incremental, &paid); err != nil {
+		t.Fatal(err)
+	}
+	if len(paid.Tools) != 1 {
+		t.Fatalf("paid turn did not receive image tool: %s", first.incremental)
+	}
+	if err = conversation.commit(first, []byte(`{"type":"response.completed","response":{"id":"resp_first","output":[{"type":"message","id":"msg_first","role":"assistant","content":[]}]}}`), 1); err != nil {
+		t.Fatal(err)
+	}
+	second, err := conversation.prepare(request, []byte(`{"type":"response.append","model":"gpt-5.3-codex-spark","input":[{"type":"message","role":"user","content":"again"}]}`), false, "plus")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var spark map[string]any
+	if err = json.Unmarshal(second.incremental, &spark); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := spark["tools"]; exists {
+		t.Fatalf("Spark append retained an injected image tool: %s", second.incremental)
+	}
+}
+
 func TestMergeWebSocketBetaHeaderReplacesStaleVersion(t *testing.T) {
 	tests := map[string]string{
 		"":                                codexResponsesWebSocketBeta,

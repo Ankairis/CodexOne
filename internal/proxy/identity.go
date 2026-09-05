@@ -121,7 +121,9 @@ func (i *codexIdentity) prepareBody(body []byte, fixed bool) ([]byte, error) {
 	}
 
 	if metadata, ok := object["client_metadata"].(map[string]any); ok {
-		i.remapClientMetadata(metadata)
+		if err = i.remapClientMetadata(metadata); err != nil {
+			return nil, err
+		}
 	}
 	if err = i.mappingError(); err != nil {
 		return nil, err
@@ -133,9 +135,9 @@ func (i *codexIdentity) prepareBody(body []byte, fixed bool) ([]byte, error) {
 	return encoded, nil
 }
 
-func (i *codexIdentity) remapClientMetadata(metadata map[string]any) {
+func (i *codexIdentity) remapClientMetadata(metadata map[string]any) error {
 	if i == nil || !i.remap || metadata == nil {
-		return
+		return nil
 	}
 	for _, field := range []struct {
 		name string
@@ -148,13 +150,33 @@ func (i *codexIdentity) remapClientMetadata(metadata map[string]any) {
 		{"thread_id", "thread"},
 		{"x-codex-thread-id", "thread"},
 	} {
-		if value, ok := metadata[field.name].(string); ok && validIdentityValue(value) {
-			metadata[field.name] = i.mapValue(field.kind, value)
+		if value, exists := metadata[field.name]; exists {
+			text, ok := value.(string)
+			if !ok {
+				return fmt.Errorf("client_metadata.%s must be a string", field.name)
+			}
+			if strings.TrimSpace(text) == "" {
+				continue
+			}
+			if !validIdentityValue(text) {
+				return fmt.Errorf("client_metadata.%s is invalid or too long", field.name)
+			}
+			metadata[field.name] = i.mapValue(field.kind, text)
 		}
 	}
 	for _, name := range []string{"x-codex-window-id", "window_id"} {
-		if value, ok := metadata[name].(string); ok && validIdentityValue(value) {
-			metadata[name] = i.mapWindow(value)
+		if value, exists := metadata[name]; exists {
+			text, ok := value.(string)
+			if !ok {
+				return fmt.Errorf("client_metadata.%s must be a string", name)
+			}
+			if strings.TrimSpace(text) == "" {
+				continue
+			}
+			if !validIdentityValue(text) {
+				return fmt.Errorf("client_metadata.%s is invalid or too long", name)
+			}
+			metadata[name] = i.mapWindow(text)
 		}
 	}
 	for _, name := range []string{"session_id", "x-codex-session-id", "prompt_cache_key"} {
@@ -163,10 +185,19 @@ func (i *codexIdentity) remapClientMetadata(metadata map[string]any) {
 		}
 	}
 	for _, name := range []string{"x-codex-turn-metadata", "turn_metadata"} {
-		if value, ok := metadata[name].(string); ok {
-			metadata[name] = i.remapTurnMetadata(value)
+		if value, exists := metadata[name]; exists {
+			text, ok := value.(string)
+			if !ok {
+				return fmt.Errorf("client_metadata.%s must be a string", name)
+			}
+			mapped, err := i.remapTurnMetadata(text)
+			if err != nil {
+				return fmt.Errorf("client_metadata.%s: %w", name, err)
+			}
+			metadata[name] = mapped
 		}
 	}
+	return i.mappingError()
 }
 
 func (i *codexIdentity) applyHeaders(target, source http.Header, websocketTransport bool) error {
@@ -198,44 +229,82 @@ func (i *codexIdentity) applyHeaders(target, source http.Header, websocketTransp
 		{"X-Client-Request-Id", "request"},
 		{"Thread-Id", "thread"},
 	} {
-		if value := cleanIdentityValue(source.Get(field.name)); value != "" {
+		if raw := strings.TrimSpace(source.Get(field.name)); raw != "" {
+			value := cleanIdentityValue(raw)
+			if value == "" {
+				return fmt.Errorf("%s is invalid or too long", field.name)
+			}
 			target.Set(field.name, i.mapValue(field.kind, value))
 		}
 	}
-	if value := cleanIdentityValue(source.Get("X-Codex-Window-Id")); value != "" {
+	if raw := strings.TrimSpace(source.Get("X-Codex-Window-Id")); raw != "" {
+		value := cleanIdentityValue(raw)
+		if value == "" {
+			return fmt.Errorf("X-Codex-Window-Id is invalid or too long")
+		}
 		target.Set("X-Codex-Window-Id", i.mapWindow(value))
 	}
 	if value := strings.TrimSpace(source.Get("X-Codex-Turn-Metadata")); value != "" {
-		target.Set("X-Codex-Turn-Metadata", i.remapTurnMetadata(value))
+		mapped, err := i.remapTurnMetadata(value)
+		if err != nil {
+			return fmt.Errorf("X-Codex-Turn-Metadata: %w", err)
+		}
+		target.Set("X-Codex-Turn-Metadata", mapped)
 	}
 	return i.mappingError()
 }
 
-func (i *codexIdentity) remapTurnMetadata(raw string) string {
-	if i == nil || !i.remap || strings.TrimSpace(raw) == "" || len(raw) > maxIdentityBytes*8 {
-		return raw
+func (i *codexIdentity) remapTurnMetadata(raw string) (string, error) {
+	if i == nil || !i.remap || strings.TrimSpace(raw) == "" {
+		return raw, nil
+	}
+	if len(raw) > maxIdentityBytes*8 {
+		return "", fmt.Errorf("value is invalid or too long")
 	}
 	var metadata map[string]any
 	if json.Unmarshal([]byte(raw), &metadata) != nil || metadata == nil {
-		return raw
+		return "", fmt.Errorf("value must be a JSON object")
 	}
-	if value, ok := metadata["prompt_cache_key"].(string); ok && value != "" && i.upstreamSessionID != "" {
-		metadata["prompt_cache_key"] = i.upstreamSessionID
+	if value, exists := metadata["prompt_cache_key"]; exists {
+		text, ok := value.(string)
+		if !ok || (strings.TrimSpace(text) != "" && !validIdentityValue(text)) {
+			return "", fmt.Errorf("prompt_cache_key is invalid or too long")
+		}
+		if i.upstreamSessionID != "" {
+			metadata["prompt_cache_key"] = i.upstreamSessionID
+		}
 	}
-	if value, ok := metadata["turn_id"].(string); ok && validIdentityValue(value) {
-		metadata["turn_id"] = i.mapValue("turn", value)
+	for _, field := range []struct {
+		name string
+		kind string
+	}{
+		{"turn_id", "turn"},
+		{"thread_id", "thread"},
+	} {
+		if value, exists := metadata[field.name]; exists {
+			text, ok := value.(string)
+			if !ok || (strings.TrimSpace(text) != "" && !validIdentityValue(text)) {
+				return "", fmt.Errorf("%s is invalid or too long", field.name)
+			}
+			if strings.TrimSpace(text) != "" {
+				metadata[field.name] = i.mapValue(field.kind, text)
+			}
+		}
 	}
-	if value, ok := metadata["thread_id"].(string); ok && validIdentityValue(value) {
-		metadata["thread_id"] = i.mapValue("thread", value)
-	}
-	if value, ok := metadata["window_id"].(string); ok && validIdentityValue(value) {
-		metadata["window_id"] = i.mapWindow(value)
+	if value, exists := metadata["window_id"]; exists {
+		text, ok := value.(string)
+		if !ok || (strings.TrimSpace(text) != "" && !validIdentityValue(text)) {
+			return "", fmt.Errorf("window_id is invalid or too long")
+		}
+		if strings.TrimSpace(text) != "" {
+			metadata["window_id"] = i.mapWindow(text)
+		}
 	}
 	encoded, err := json.Marshal(metadata)
 	if err != nil {
-		return raw
+		return "", fmt.Errorf("encode value: %w", err)
 	}
-	return string(encoded)
+	return string(encoded), i.mappingError()
 }
 
 func (i *codexIdentity) mapWindow(value string) string {

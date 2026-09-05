@@ -32,6 +32,7 @@ type webSocketTurnPlan struct {
 	reset        bool
 	continuation bool
 	identity     *codexIdentity
+	turnSettings map[string]json.RawMessage
 }
 
 func (c *webSocketConversation) prepare(r *http.Request, raw []byte, remap bool, planTypes ...string) (webSocketTurnPlan, error) {
@@ -63,7 +64,7 @@ func (c *webSocketConversation) prepare(r *http.Request, raw []byte, remap bool,
 		return webSocketTurnPlan{}, fmt.Errorf("previous_response_id is not available on this WebSocket")
 	}
 	continuation := requestType == "response.append" || previousResponseID != ""
-	inputLooksComplete := webSocketInputLooksLikeTranscript(object["input"])
+	inputLooksComplete := requestType == "response.create" && webSocketInputLooksLikeTranscript(object["input"])
 	reset := !continuation || inputLooksComplete
 	if inputLooksComplete {
 		continuation = false
@@ -131,6 +132,10 @@ func (c *webSocketConversation) prepare(r *http.Request, raw []byte, remap bool,
 			return webSocketTurnPlan{}, err
 		}
 	}
+	turnSettings, err := webSocketTurnSettings(normalized)
+	if err != nil {
+		return webSocketTurnPlan{}, err
+	}
 	normalized, err = prepareCodexWebSocketBody(normalized, model, planType, r.Header, identity)
 	if err != nil {
 		return webSocketTurnPlan{}, err
@@ -174,6 +179,7 @@ func (c *webSocketConversation) prepare(r *http.Request, raw []byte, remap bool,
 		reset:        reset,
 		continuation: continuation,
 		identity:     identity,
+		turnSettings: turnSettings,
 	}, nil
 }
 
@@ -225,21 +231,16 @@ func (c *webSocketConversation) commit(plan webSocketTurnPlan, terminal []byte, 
 	c.pendingCallIDs = pendingWebSocketCallIDs(event.Response.Output)
 	c.hasCompleted = true
 
-	requestObject, _ := decodeJSONObject(plan.incremental)
 	if plan.reset {
 		c.turnSettings = nil
 	}
-	for _, name := range webSocketContinuationFields {
-		if value, exists := requestObject[name]; exists {
-			encoded, encodeErr := json.Marshal(value)
-			if encodeErr == nil {
-				if c.turnSettings == nil {
-					c.turnSettings = make(map[string]json.RawMessage)
-				}
-				c.turnSettings[name] = encoded
-			}
+	for name, raw := range plan.turnSettings {
+		if c.turnSettings == nil {
+			c.turnSettings = make(map[string]json.RawMessage)
 		}
+		c.turnSettings[name] = bytes.Clone(raw)
 	}
+	requestObject, _ := decodeJSONObject(plan.incremental)
 	if raw, exists := requestObject["instructions"]; exists {
 		if encoded, err := json.Marshal(raw); err == nil {
 			c.instructions = encoded
@@ -251,6 +252,24 @@ func (c *webSocketConversation) commit(plan webSocketTurnPlan, terminal []byte, 
 }
 
 var webSocketContinuationFields = []string{"tools", "tool_choice", "parallel_tool_calls"}
+
+func webSocketTurnSettings(body []byte) (map[string]json.RawMessage, error) {
+	object, err := decodeJSONObject(body)
+	if err != nil {
+		return nil, err
+	}
+	settings := make(map[string]json.RawMessage)
+	for _, name := range webSocketContinuationFields {
+		if value, exists := object[name]; exists {
+			encoded, encodeErr := json.Marshal(value)
+			if encodeErr != nil {
+				return nil, fmt.Errorf("encode WebSocket %s setting: %w", name, encodeErr)
+			}
+			settings[name] = encoded
+		}
+	}
+	return settings, nil
+}
 
 func (c *webSocketConversation) replayLimit() int64 {
 	if c != nil && c.maxReplayBytes > 0 {

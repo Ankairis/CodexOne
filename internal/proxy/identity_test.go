@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/Ankairis/CodexOne/internal/store"
@@ -201,5 +202,18 @@ func TestExposePayloadReturnsOriginalBufferWhenNoIdentityMatches(t *testing.T) {
 	exposed := identity.exposePayload(payload)
 	if len(exposed) == 0 || &exposed[0] != &payload[0] {
 		t.Fatal("unmatched payload was copied")
+	}
+}
+
+func TestIdentityRemapRejectsUnmappableHeader(t *testing.T) {
+	ctx := WithAPIKey(context.Background(), store.APIKey{ID: "key_private"})
+	headers := http.Header{"X-Client-Request-Id": {strings.Repeat("x", maxIdentityBytes+1)}}
+	_, identity, err := prepareRequestIdentity(ctx, headers, []byte(`{"model":"gpt-test","input":"hello"}`), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := headers.Clone()
+	if err = identity.applyHeaders(target, headers, false); err == nil {
+		t.Fatal("unmappable identity header was forwarded")
 	}
 }
