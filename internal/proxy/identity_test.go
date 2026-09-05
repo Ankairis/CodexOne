@@ -187,3 +187,15 @@ func TestIdentityMappingBudgetIsBounded(t *testing.T) {
 		t.Fatalf("remembered mappings = %d, want %d", got, maxIdentityMappings)
 	}
 }
+
+func TestExposePayloadReturnsOriginalBufferWhenNoIdentityMatches(t *testing.T) {
+	identity := &codexIdentity{remap: true, reverse: make(map[string]string)}
+	for index := 0; index < maxIdentityMappings; index++ {
+		identity.remember(fmt.Sprintf("upstream-%03d", index), fmt.Sprintf("client-%03d", index))
+	}
+	payload := []byte(`{"type":"response.output_text.delta","delta":"no mapped identifiers"}`)
+	exposed := identity.exposePayload(payload)
+	if len(exposed) == 0 || &exposed[0] != &payload[0] {
+		t.Fatal("unmatched payload was copied")
+	}
+}

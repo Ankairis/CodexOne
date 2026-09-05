@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -38,6 +39,7 @@ type codexIdentity struct {
 	reverse      map[string]string
 	mappingBytes int
 	mappingErr   error
+	matcher      *regexp.Regexp
 }
 
 // prepareRequestIdentity makes the prompt cache key and transport session
@@ -289,6 +291,7 @@ func (i *codexIdentity) remember(upstream, client string) {
 	}
 	i.reverse[upstream] = client
 	i.mappingBytes += addedBytes
+	i.matcher = nil
 }
 
 func (i *codexIdentity) mappingError() error {
@@ -307,25 +310,48 @@ func (i *codexIdentity) exposePayload(payload []byte) []byte {
 	if i == nil || len(payload) == 0 {
 		return payload
 	}
-	i.mu.RLock()
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if len(i.reverse) == 0 {
+		return payload
+	}
 	keys := make([]string, 0, len(i.reverse))
 	for key := range i.reverse {
 		keys = append(keys, key)
 	}
 	sort.Slice(keys, func(a, b int) bool { return len(keys[a]) > len(keys[b]) })
-	reverse := make(map[string]string, len(i.reverse))
-	for key, value := range i.reverse {
-		reverse[key] = value
-	}
-	i.mu.RUnlock()
-	out := payload
-	for _, key := range keys {
-		encoded, err := json.Marshal(reverse[key])
-		if err != nil || len(encoded) < 2 {
-			continue
+	if i.matcher == nil {
+		patterns := make([]string, len(keys))
+		for index, key := range keys {
+			patterns[index] = regexp.QuoteMeta(key)
 		}
-		out = bytes.ReplaceAll(out, []byte(key), encoded[1:len(encoded)-1])
+		matcher, err := regexp.Compile(strings.Join(patterns, "|"))
+		if err != nil {
+			return payload
+		}
+		i.matcher = matcher
 	}
+	first := i.matcher.FindIndex(payload)
+	if first == nil {
+		return payload
+	}
+	out := make([]byte, 0, len(payload))
+	start := 0
+	match := first
+	for match != nil {
+		matchStart, matchEnd := start+match[0], start+match[1]
+		out = append(out, payload[start:matchStart]...)
+		client := i.reverse[string(payload[matchStart:matchEnd])]
+		encoded, err := json.Marshal(client)
+		if err != nil || len(encoded) < 2 {
+			out = append(out, payload[matchStart:matchEnd]...)
+		} else {
+			out = append(out, encoded[1:len(encoded)-1]...)
+		}
+		start = matchEnd
+		match = i.matcher.FindIndex(payload[start:])
+	}
+	out = append(out, payload[start:]...)
 	return out
 }
 
