@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"bufio"
+	"context"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -89,6 +90,59 @@ func TestChromeRoundTripperHonorsHTTPProxy(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("proxy did not receive CONNECT tunnel traffic")
+	}
+}
+
+func TestChromeRoundTripperCancelsStalledProxyConnect(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	accepted := make(chan struct{})
+	release := make(chan struct{})
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer connection.Close()
+		close(accepted)
+		<-release
+	}()
+	defer close(release)
+
+	proxyURL, err := url.Parse("http://" + listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := &chromeRoundTripper{proxy: func(*http.Request) (*url.URL, error) { return proxyURL, nil }}
+	ctx, cancel := context.WithCancel(context.Background())
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		connection, dialErr := transport.dialConnection(request, "chatgpt.com:443")
+		if connection != nil {
+			_ = connection.Close()
+		}
+		result <- dialErr
+	}()
+	select {
+	case <-accepted:
+	case <-time.After(time.Second):
+		t.Fatal("proxy did not accept the connection")
+	}
+	cancel()
+	select {
+	case err = <-result:
+		if err == nil {
+			t.Fatal("canceled proxy CONNECT returned no error")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("proxy CONNECT did not stop promptly after cancellation")
 	}
 }
 

@@ -165,6 +165,10 @@ func dialHTTPConnectProxy(ctx context.Context, dialer *net.Dialer, proxyURL *url
 			_ = connection.Close()
 		}
 	}()
+	stopCancellation := context.AfterFunc(ctx, func() {
+		_ = connection.Close()
+	})
+	defer stopCancellation()
 	if strings.EqualFold(proxyURL.Scheme, "https") {
 		tlsConnection := standardtls.Client(connection, &standardtls.Config{ServerName: proxyURL.Hostname(), MinVersion: standardtls.VersionTLS12})
 		if err = tlsConnection.HandshakeContext(ctx); err != nil {

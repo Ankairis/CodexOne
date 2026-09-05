@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/Ankairis/CodexOne/internal/codex"
 	"github.com/Ankairis/CodexOne/internal/store"
 	"github.com/gorilla/websocket"
 )
@@ -157,13 +158,14 @@ func (s *responsesWebSocketSession) handleTurn(ctx context.Context, raw []byte) 
 	if !s.authorizeTurn(ctx, &result) {
 		return result
 	}
-	account, err := s.service.auth.Account(ctx)
+	credential, err := s.service.auth.FreshCredential(ctx)
 	if err != nil {
+		s.closeUpstream()
 		result.status, result.errText = http.StatusServiceUnavailable, err.Error()
 		_ = s.downstream.writeError("account_unavailable", accountUnavailableClientMessage, result.requestID, result.status)
 		return result
 	}
-	plan, err := s.conversation.prepare(s.request, raw, s.service.cfg.CodexIdentityRemap, account.PlanType)
+	plan, err := s.conversation.prepare(s.request, raw, s.service.cfg.CodexIdentityRemap, credential.PlanType)
 	if err != nil {
 		result.status, result.errText = http.StatusBadRequest, err.Error()
 		_ = s.downstream.writeError("invalid_request", result.errText, result.requestID, result.status)
@@ -172,7 +174,7 @@ func (s *responsesWebSocketSession) handleTurn(ctx context.Context, raw []byte) 
 	result.model = plan.model
 	result.telemetry.ReasoningEffort = plan.reasoning
 
-	upstream, dialFailure := s.ensureUpstream(ctx, plan.identity)
+	upstream, dialFailure := s.ensureUpstream(ctx, plan.identity, credential)
 	if upstream == nil {
 		if s.service.cfg.CodexWSHTTPFallback {
 			return s.executeHTTPFallback(ctx, plan, result, dialFailure)
@@ -360,8 +362,8 @@ func (s *responsesWebSocketSession) executeHTTPFallback(ctx context.Context, pla
 	}
 }
 
-func (s *responsesWebSocketSession) ensureUpstream(ctx context.Context, identity *codexIdentity) (*upstreamWebSocket, upstreamDialFailure) {
-	if s.upstream != nil && s.upstream.alive() {
+func (s *responsesWebSocketSession) ensureUpstream(ctx context.Context, identity *codexIdentity, credential codex.Credential) (*upstreamWebSocket, upstreamDialFailure) {
+	if s.upstream != nil && s.upstream.accountID == credential.AccountID && s.upstream.alive() {
 		return s.upstream, upstreamDialFailure{}
 	}
 	s.closeUpstream()
@@ -369,10 +371,6 @@ func (s *responsesWebSocketSession) ensureUpstream(ctx context.Context, identity
 		return nil, upstreamDialFailure{message: "WebSocket retry cooldown is active"}
 	}
 
-	credential, err := s.service.auth.FreshCredential(ctx)
-	if err != nil {
-		return nil, upstreamDialFailure{status: http.StatusServiceUnavailable, message: err.Error()}
-	}
 	upstreamURL, err := codexWebSocketURL(s.service.cfg.UpstreamBaseURL + "/backend-api/codex/responses")
 	if err != nil {
 		return nil, upstreamDialFailure{status: http.StatusInternalServerError, message: err.Error()}
@@ -406,7 +404,7 @@ func (s *responsesWebSocketSession) ensureUpstream(ctx context.Context, identity
 		return nil, failure
 	}
 	s.nextGeneration++
-	s.upstream = newUpstreamWebSocket(connection, s.nextGeneration)
+	s.upstream = newUpstreamWebSocket(connection, s.nextGeneration, credential.AccountID)
 	s.webSocketRetryAt = time.Time{}
 	return s.upstream, upstreamDialFailure{}
 }
@@ -438,6 +436,7 @@ type upstreamWebSocketFrame struct {
 type upstreamWebSocket struct {
 	conn       *websocket.Conn
 	generation uint64
+	accountID  string
 	events     chan upstreamWebSocketFrame
 	done       chan struct{}
 	stop       chan struct{}
@@ -447,10 +446,11 @@ type upstreamWebSocket struct {
 	err        error
 }
 
-func newUpstreamWebSocket(connection *websocket.Conn, generation uint64) *upstreamWebSocket {
+func newUpstreamWebSocket(connection *websocket.Conn, generation uint64, accountID string) *upstreamWebSocket {
 	socket := &upstreamWebSocket{
 		conn:       connection,
 		generation: generation,
+		accountID:  accountID,
 		events:     make(chan upstreamWebSocketFrame, webSocketUpstreamEventBacklog),
 		done:       make(chan struct{}),
 		stop:       make(chan struct{}),
