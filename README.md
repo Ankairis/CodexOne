@@ -46,7 +46,7 @@ flowchart LR
 - **不是透明代理**：Responses 请求会按 Codex 后端要求标准化；Chat Completions 会转换为 Responses 协议后再转换回来。
 - **只记录元数据**：请求日志保存时间、模型、状态、耗时和 token 数，不保存提示词或响应正文。
 
-这里的客户端身份处理只是应用层请求头与请求体兼容，不承诺“不可检测”，也不会改变账号权限或服务端规则。
+这里的客户端兼容处理覆盖请求头、请求体和可选的 TLS ClientHello，但不承诺“不可检测”，也不会改变账号权限或服务端规则。
 
 ## 功能
 
@@ -59,12 +59,13 @@ flowchart LR
 兼容入口：
 
 - `GET /v1/models`
+- `GET /v1/responses`（WebSocket Upgrade）
 - `POST /v1/responses`
 - `POST /v1/responses/compact`
 - `POST /v1/responses/input_tokens`
 - `POST /v1/chat/completions`
 
-Responses 与 Chat Completions 均支持流式和非流式调用。Chat Completions 会透传 `reasoning_effort`（未指定时默认 `medium`），并把 Codex 推理摘要映射为 `reasoning_content`，同时返回 `completion_tokens_details.reasoning_tokens`。
+Responses 与 Chat Completions 均支持流式和非流式调用；`GET /v1/responses` 还支持 `response.create` / `response.append` JSON WebSocket 消息，后续 `response.append` 会衔接当前连接上已完成的 Response。代理会优先沿用客户端的 `prompt_cache_key` 或 `Session-Id`，缺失时按本地 API Key 生成稳定标识，并让上游请求体与会话头保持一致。转发前还会清理仅属于客户端状态链的字段、修复输入 item ID 和无效 reasoning 加密内容，并按 Codex 账号与模型能力补齐图片工具。Chat Completions 会透传 `reasoning_effort`（未指定时默认 `medium`），并把 Codex 推理摘要映射为 `reasoning_content`，同时返回 `completion_tokens_details.reasoning_tokens`。
 
 ## 快速部署：SQLite
 
@@ -133,6 +134,8 @@ curl https://xxx.xxx.com/v1/responses \
 
 把兼容客户端的 Base URL 设为 `https://xxx.xxx.com/v1`，API Key 使用后台创建的值即可。
 
+Responses WebSocket 使用同一路径：`wss://xxx.xxx.com/v1/responses`，通过 `Authorization: Bearer sk-codexone-...` 完成握手认证；连接中的请求和响应均为 JSON 文本消息。
+
 ## 本地开发
 
 需要 Go 1.26.6 或更高补丁版本、Node.js 24 和 npm。
@@ -164,6 +167,9 @@ go run ./cmd/server
 | `MAX_REQUEST_MIB` | `32` | 单个代理请求正文上限 |
 | `SESSION_TTL_HOURS` | `24` | 后台登录有效期 |
 | `CODEX_CLIENT_VERSION` | `0.146.0` | 上游请求中的 Codex 版本 |
+| `CODEX_CHROME_TLS` | `true` | 仅对官方 `chatgpt.com` HTTP/SSE 上游启用 Chrome 风格 TLS ClientHello；排障时可关闭 |
+| `CODEX_IDENTITY_REMAP` | `true` | 为上游映射会话、Response 与 item ID，并在返回客户端前还原 |
+| `CODEX_WEBSOCKET_HTTP_FALLBACK` | `true` | 上游 WebSocket 不可用时自动回退到 HTTP/SSE |
 
 `ADMIN_PASSWORD` 仅在数据库第一次初始化时生效；后续修改环境变量不会覆盖后台中保存的密码。
 

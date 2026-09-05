@@ -23,6 +23,7 @@ import (
 	"github.com/Ankairis/CodexOne/internal/security"
 	"github.com/Ankairis/CodexOne/internal/session"
 	"github.com/Ankairis/CodexOne/internal/store"
+	"github.com/Ankairis/CodexOne/internal/upstream"
 )
 
 const (
@@ -99,7 +100,7 @@ func NewManager(cfg config.Config, database *store.Store, cipher *cryptox.Cipher
 		store:    database,
 		cipher:   cipher,
 		sessions: sessions,
-		client:   &http.Client{Timeout: 30 * time.Second},
+		client:   upstream.NewHTTPClient(30*time.Second, cfg.CodexChromeTLS),
 		logger:   logger,
 	}
 }

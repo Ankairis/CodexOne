@@ -79,6 +79,7 @@ func New(cfg config.Config, database *store.Store, sessions session.Store, codex
 		v1.Use(server.requireAPIKey)
 		v1.Options("/*", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 		v1.Get("/models", server.proxy.Models)
+		v1.Get("/responses", server.proxy.ResponsesWebSocket)
 		v1.Post("/chat/completions", server.proxy.ChatCompletions)
 		v1.Post("/responses", server.proxy.Responses)
 		v1.Post("/responses/compact", server.proxy.Compact)

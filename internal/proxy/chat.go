@@ -38,11 +38,23 @@ func (s *Service) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, "invalid_request", errText, requestID)
 		return
 	}
+	body, identity, err := prepareRequestIdentity(r.Context(), r.Header, body, s.cfg.CodexIdentityRemap)
+	if err != nil {
+		status, errText = http.StatusBadRequest, err.Error()
+		writeError(w, status, "invalid_request", errText, requestID)
+		return
+	}
 	telemetry.ReasoningEffort = reasoningEffortFromBody(body)
 	credential, err := s.auth.FreshCredential(r.Context())
 	if err != nil {
 		status, errText = http.StatusServiceUnavailable, err.Error()
 		writeError(w, status, "account_unavailable", accountUnavailableClientMessage, requestID)
+		return
+	}
+	body, err = prepareCodexChatBody(body, model, credential.PlanType, r.Header, identity)
+	if err != nil {
+		status, errText = http.StatusBadRequest, err.Error()
+		writeError(w, status, "invalid_request", errText, requestID)
 		return
 	}
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, s.cfg.UpstreamBaseURL+"/backend-api/codex/responses", bytes.NewReader(body))
@@ -53,6 +65,11 @@ func (s *Service) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	upstreamReq.Header.Set("Content-Type", "application/json")
 	copyCodexContextHeaders(upstreamReq.Header, r.Header)
+	if err = identity.applyHeaders(upstreamReq.Header, r.Header, false); err != nil {
+		status, errText = http.StatusBadRequest, err.Error()
+		writeError(w, status, "invalid_request", errText, requestID)
+		return
+	}
 	s.auth.ApplyCodexHeaders(upstreamReq, credential, "text/event-stream")
 	resp, err := s.client.Do(upstreamReq)
 	if err != nil {
@@ -64,6 +81,7 @@ func (s *Service) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	copyQuotaHeaders(w.Header(), resp.Header)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		rawError, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+		rawError = identity.exposePayload(rawError)
 		status, errText = resp.StatusCode, compactError(rawError)
 		writeUpstreamError(w, resp, rawError, requestID)
 		return
@@ -71,12 +89,12 @@ func (s *Service) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if stream {
 		var usage tokenUsage
 		var observed requestTelemetry
-		status, usage, observed, errText = streamChatResponse(w, resp.Body, requestID, model, includeUsage, started)
+		status, usage, observed, errText = streamChatResponse(w, resp.Body, requestID, model, includeUsage, started, identity)
 		inputTokens, outputTokens = usage.InputTokens, usage.OutputTokens
 		telemetry.mergeResponse(observed, usage)
 		return
 	}
-	final, usage, err := collectResponse(resp.Body)
+	final, usage, err := collectResponse(resp.Body, identity)
 	if err != nil {
 		var failure *upstreamResponseError
 		if errors.As(err, &failure) {
@@ -398,7 +416,7 @@ type chatStreamState struct {
 	started      time.Time
 }
 
-func streamChatResponse(w http.ResponseWriter, reader io.Reader, requestID, fallbackModel string, includeUsage bool, started time.Time) (int, tokenUsage, requestTelemetry, string) {
+func streamChatResponse(w http.ResponseWriter, reader io.Reader, requestID, fallbackModel string, includeUsage bool, started time.Time, identities ...*codexIdentity) (int, tokenUsage, requestTelemetry, string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming_unsupported", "server does not support streaming", requestID)
@@ -413,6 +431,9 @@ func streamChatResponse(w http.ResponseWriter, reader io.Reader, requestID, fall
 	buffered := bufio.NewReader(reader)
 	for {
 		line, err := buffered.ReadBytes('\n')
+		if len(identities) > 0 {
+			line = identities[0].exposePayload(line)
+		}
 		if payload := ssePayload(line); len(payload) > 0 && !bytes.Equal(payload, []byte("[DONE]")) {
 			if writeErr := translateChatEvent(w, flusher, payload, state, includeUsage); writeErr != nil {
 				return 499, state.usage, state.telemetry, "client disconnected"

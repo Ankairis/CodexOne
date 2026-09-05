@@ -1,0 +1,272 @@
+package upstream
+
+import (
+	"bufio"
+	"context"
+	"encoding/base64"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"strings"
+	"testing"
+	"time"
+)
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return function(request)
+}
+
+func TestChromeRoundTripperHonorsHTTPProxy(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	serverErr := make(chan error, 1)
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			serverErr <- acceptErr
+			return
+		}
+		defer connection.Close()
+		request, readErr := http.ReadRequest(bufio.NewReader(connection))
+		if readErr != nil {
+			serverErr <- readErr
+			return
+		}
+		if request.Method != http.MethodConnect || request.Host != "chatgpt.com:443" {
+			serverErr <- fmt.Errorf("CONNECT request = %s %s", request.Method, request.Host)
+			return
+		}
+		wantAuthorization := "Basic " + base64.StdEncoding.EncodeToString([]byte("proxy-user:proxy-pass"))
+		if request.Header.Get("Proxy-Authorization") != wantAuthorization {
+			serverErr <- fmt.Errorf("Proxy-Authorization = %q", request.Header.Get("Proxy-Authorization"))
+			return
+		}
+		if _, writeErr := io.WriteString(connection, "HTTP/1.1 200 Connection Established\r\n\r\n"); writeErr != nil {
+			serverErr <- writeErr
+			return
+		}
+		buffer := make([]byte, 4)
+		if _, readErr = io.ReadFull(connection, buffer); readErr != nil {
+			serverErr <- readErr
+			return
+		}
+		if string(buffer) != "ping" {
+			serverErr <- fmt.Errorf("tunnel payload = %q", buffer)
+			return
+		}
+		serverErr <- nil
+	}()
+
+	proxyURL, err := url.Parse("http://proxy-user:proxy-pass@" + listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := &chromeRoundTripper{proxy: func(*http.Request) (*url.URL, error) { return proxyURL, nil }}
+	request, err := http.NewRequest(http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, err := transport.dialConnection(request, "chatgpt.com:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = io.WriteString(connection, "ping"); err != nil {
+		_ = connection.Close()
+		t.Fatal(err)
+	}
+	_ = connection.Close()
+	select {
+	case err = <-serverErr:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("proxy did not receive CONNECT tunnel traffic")
+	}
+}
+
+func TestChromeRoundTripperCancelsStalledProxyConnect(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	accepted := make(chan struct{})
+	release := make(chan struct{})
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer connection.Close()
+		close(accepted)
+		<-release
+	}()
+	defer close(release)
+
+	proxyURL, err := url.Parse("http://" + listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := &chromeRoundTripper{proxy: func(*http.Request) (*url.URL, error) { return proxyURL, nil }}
+	ctx, cancel := context.WithCancel(context.Background())
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		connection, dialErr := transport.dialConnection(request, "chatgpt.com:443")
+		if connection != nil {
+			_ = connection.Close()
+		}
+		result <- dialErr
+	}()
+	select {
+	case <-accepted:
+	case <-time.After(time.Second):
+		t.Fatal("proxy did not accept the connection")
+	}
+	cancel()
+	select {
+	case err = <-result:
+		if err == nil {
+			t.Fatal("canceled proxy CONNECT returned no error")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("proxy CONNECT did not stop promptly after cancellation")
+	}
+}
+
+func TestChromeRoundTripperBoundsTLSHandshake(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	release := make(chan struct{})
+	defer close(release)
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer connection.Close()
+		request, readErr := http.ReadRequest(bufio.NewReader(connection))
+		if readErr != nil || request.Method != http.MethodConnect {
+			return
+		}
+		_, _ = io.WriteString(connection, "HTTP/1.1 200 Connection Established\r\n\r\n")
+		<-release
+	}()
+
+	proxyURL, err := url.Parse("http://" + listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := &chromeRoundTripper{
+		proxy:            func(*http.Request) (*url.URL, error) { return proxyURL, nil },
+		handshakeTimeout: 100 * time.Millisecond,
+	}
+	request, err := http.NewRequest(http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	if _, err = transport.RoundTrip(request); err == nil || !strings.Contains(err.Error(), "handshake") {
+		t.Fatalf("stalled TLS handshake error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("stalled TLS handshake took %s", elapsed)
+	}
+}
+
+func TestChromeRoundTripperBoundsHTTPSProxyHandshake(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	release := make(chan struct{})
+	defer close(release)
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer connection.Close()
+		<-release
+	}()
+
+	proxyURL, err := url.Parse("https://" + listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := &chromeRoundTripper{
+		proxy:            func(*http.Request) (*url.URL, error) { return proxyURL, nil },
+		handshakeTimeout: 100 * time.Millisecond,
+	}
+	request, err := http.NewRequest(http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	if _, err = transport.dialConnection(request, "chatgpt.com:443"); err == nil || !strings.Contains(err.Error(), "proxy") || !strings.Contains(err.Error(), "handshake") {
+		t.Fatalf("stalled HTTPS proxy handshake error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("stalled HTTPS proxy handshake took %s", elapsed)
+	}
+}
+
+func TestSelectiveRoundTripperUsesChromeOnlyForExactChatGPTHost(t *testing.T) {
+	var selected string
+	response := func() *http.Response {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("ok")), Header: make(http.Header)}
+	}
+	transport := &selectiveRoundTripper{
+		chrome: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			selected = "chrome"
+			return response(), nil
+		}),
+		fallback: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			selected = "fallback"
+			return response(), nil
+		}),
+	}
+
+	tests := []struct {
+		url  string
+		want string
+	}{
+		{url: "https://chatgpt.com/backend-api/codex/responses", want: "chrome"},
+		{url: "http://chatgpt.com/backend-api/codex/responses", want: "fallback"},
+		{url: "https://chatgpt.com.example/backend-api/codex/responses", want: "fallback"},
+		{url: "https://example.com/backend-api/codex/responses", want: "fallback"},
+	}
+	for _, test := range tests {
+		t.Run(test.url, func(t *testing.T) {
+			selected = ""
+			request, err := http.NewRequest(http.MethodGet, test.url, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := transport.RoundTrip(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = result.Body.Close()
+			if selected != test.want {
+				t.Fatalf("selected transport = %q, want %q", selected, test.want)
+			}
+		})
+	}
+}
