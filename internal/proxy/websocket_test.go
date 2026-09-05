@@ -3,6 +3,7 @@ package proxy
 import (
 	"encoding/json"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Ankairis/CodexOne/internal/store"
@@ -154,6 +155,58 @@ func TestDownstreamWebSocketInboxBoundsQueuedBytes(t *testing.T) {
 	inbox.release(second)
 	if got := inbox.queuedBytes.Load(); got != 0 {
 		t.Fatalf("queued bytes after release = %d, want 0", got)
+	}
+}
+
+func TestUpstreamWebSocketBoundsQueuedBytes(t *testing.T) {
+	upstream := &upstreamWebSocket{maxQueuedBytes: 10}
+	first := upstreamWebSocketFrame{payload: []byte("123456")}
+	second := upstreamWebSocketFrame{payload: []byte("12345")}
+	if !upstream.reserve(first) {
+		t.Fatal("first event did not fit within the byte budget")
+	}
+	if upstream.reserve(second) {
+		t.Fatal("aggregate upstream queue exceeded its byte budget")
+	}
+	if got := upstream.queuedBytes.Load(); got != 6 {
+		t.Fatalf("queued bytes = %d, want 6", got)
+	}
+	upstream.release(first)
+	if !upstream.reserve(second) {
+		t.Fatal("released upstream capacity was not reusable")
+	}
+	upstream.release(second)
+	if got := upstream.queuedBytes.Load(); got != 0 {
+		t.Fatalf("queued bytes after release = %d, want 0", got)
+	}
+}
+
+func TestWebSocketConversationRejectsTerminalOutputBeyondReplayBudget(t *testing.T) {
+	request := httptest.NewRequest("GET", "/v1/responses", nil)
+	request = request.WithContext(WithAPIKey(request.Context(), store.APIKey{ID: "key_ws"}))
+	conversation := webSocketConversation{maxReplayBytes: 2 << 10}
+	plan, err := conversation.prepare(request, []byte(`{"type":"response.create","model":"gpt-test","input":"hello"}`), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal, err := json.Marshal(map[string]any{
+		"type": "response.completed",
+		"response": map[string]any{
+			"id": "resp_large",
+			"output": []any{map[string]any{
+				"type": "message", "id": "msg_large", "role": "assistant",
+				"content": []any{map[string]any{"type": "output_text", "text": strings.Repeat("x", 3<<10)}},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = conversation.commit(plan, terminal, 1); err == nil {
+		t.Fatal("oversized terminal output was retained")
+	}
+	if conversation.hasCompleted || len(conversation.history) != 0 {
+		t.Fatalf("oversized response mutated conversation state: %#v", conversation)
 	}
 }
 

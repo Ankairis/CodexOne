@@ -122,6 +122,31 @@ func TestPrepareCodexHTTPBodyRepairsNonArrayTools(t *testing.T) {
 	}
 }
 
+func TestPrepareCodexChatBodyDoesNotInjectImageTool(t *testing.T) {
+	body, err := prepareCodexChatBody([]byte(`{
+		"model":"gpt-5.6-sol",
+		"input":[{"type":"message","id":"client-message","role":"user","content":"hello"}],
+		"previous_response_id":"resp_old"
+	}`), "gpt-5.6-sol", "plus", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err = json.Unmarshal(body, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := decoded["tools"]; exists {
+		t.Fatalf("Chat Completions request gained an image tool: %s", body)
+	}
+	if _, exists := decoded["previous_response_id"]; exists {
+		t.Fatalf("Chat Completions request retained HTTP state: %s", body)
+	}
+	input := decoded["input"].([]any)
+	if got := input[0].(map[string]any)["id"]; got != "msg_client-message" {
+		t.Fatalf("message id = %#v", got)
+	}
+}
+
 func TestPrepareCodexWebSocketBodyPreservesIncrementalState(t *testing.T) {
 	result, err := prepareCodexWebSocketBody([]byte(`{
 		"model":"gpt-5.6-sol",

@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-const maxWebSocketReplayBytes = 128 << 20
+const defaultWebSocketReplayBytes = 32 << 20
 
 type webSocketConversation struct {
 	identity       *codexIdentity
@@ -19,6 +19,7 @@ type webSocketConversation struct {
 	lastGeneration uint64
 	pendingCallIDs []string
 	hasCompleted   bool
+	maxReplayBytes int64
 }
 
 type webSocketTurnPlan struct {
@@ -149,8 +150,8 @@ func (c *webSocketConversation) prepare(r *http.Request, raw []byte, remap bool,
 	if err != nil {
 		return webSocketTurnPlan{}, fmt.Errorf("encode replay WebSocket request: %w", err)
 	}
-	if len(replay) > maxWebSocketReplayBytes {
-		return webSocketTurnPlan{}, fmt.Errorf("conversation replay exceeds %d MiB; send a compact response.create transcript", maxWebSocketReplayBytes>>20)
+	if int64(len(replay)) > c.replayLimit() {
+		return webSocketTurnPlan{}, c.replayLimitError()
 	}
 
 	return webSocketTurnPlan{
@@ -188,12 +189,24 @@ func (c *webSocketConversation) commit(plan webSocketTurnPlan, terminal []byte, 
 	if strings.TrimSpace(event.Response.ID) == "" {
 		return fmt.Errorf("terminal WebSocket response is missing response.id")
 	}
-	if plan.reset {
-		c.history = cloneRawMessages(plan.currentInput)
-	} else {
-		c.history = mergeWebSocketItems(c.history, plan.currentInput)
+	history := cloneRawMessages(plan.currentInput)
+	if !plan.reset {
+		history = mergeWebSocketItems(c.history, plan.currentInput)
 	}
-	c.history = mergeWebSocketItems(c.history, event.Response.Output)
+	history = mergeWebSocketItems(history, event.Response.Output)
+	replayObject, err := decodeJSONObject(plan.replay)
+	if err != nil {
+		return fmt.Errorf("decode replay WebSocket request: %w", err)
+	}
+	replayObject["input"] = rawMessagesAsAny(history)
+	replay, err := json.Marshal(replayObject)
+	if err != nil {
+		return fmt.Errorf("encode replay WebSocket request: %w", err)
+	}
+	if int64(len(replay)) > c.replayLimit() {
+		return c.replayLimitError()
+	}
+	c.history = history
 	c.identity = plan.identity
 	c.model = plan.model
 	c.lastResponseID = strings.TrimSpace(event.Response.ID)
@@ -210,6 +223,18 @@ func (c *webSocketConversation) commit(plan webSocketTurnPlan, terminal []byte, 
 		c.instructions = bytes.Clone(event.Response.Instructions)
 	}
 	return nil
+}
+
+func (c *webSocketConversation) replayLimit() int64 {
+	if c != nil && c.maxReplayBytes > 0 {
+		return c.maxReplayBytes
+	}
+	return defaultWebSocketReplayBytes
+}
+
+func (c *webSocketConversation) replayLimitError() error {
+	limit := c.replayLimit()
+	return fmt.Errorf("conversation replay exceeds %d MiB; send a compact response.create transcript", limit>>20)
 }
 
 func (c *webSocketConversation) identityFor(plan webSocketTurnPlan) *codexIdentity {

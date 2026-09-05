@@ -101,6 +101,9 @@ func (s *Service) ResponsesWebSocket(w http.ResponseWriter, r *http.Request) {
 		request:    r,
 		downstream: downstream,
 		inbox:      inbox,
+		conversation: webSocketConversation{
+			maxReplayBytes: readLimit,
+		},
 	}
 	defer session.closeUpstream()
 
@@ -258,6 +261,7 @@ func (s *responsesWebSocketSession) forwardWebSocketTurn(ctx context.Context, up
 				s.invalidateUpstream()
 				return result
 			}
+			upstream.release(frame)
 			payload := normalizeWebSocketTerminal(frame.payload)
 			observeResponsePayload(payload, &result.usage, &result.telemetry, result.started)
 			if err := s.downstream.write(identity.exposePayload(payload)); err != nil {
@@ -436,26 +440,29 @@ type upstreamWebSocketFrame struct {
 }
 
 type upstreamWebSocket struct {
-	conn       *websocket.Conn
-	generation uint64
-	accountID  string
-	events     chan upstreamWebSocketFrame
-	done       chan struct{}
-	stop       chan struct{}
-	writeMu    sync.Mutex
-	closeOnce  sync.Once
-	errMu      sync.RWMutex
-	err        error
+	conn           *websocket.Conn
+	generation     uint64
+	accountID      string
+	events         chan upstreamWebSocketFrame
+	done           chan struct{}
+	stop           chan struct{}
+	maxQueuedBytes int64
+	queuedBytes    atomic.Int64
+	writeMu        sync.Mutex
+	closeOnce      sync.Once
+	errMu          sync.RWMutex
+	err            error
 }
 
 func newUpstreamWebSocket(connection *websocket.Conn, generation uint64, accountID string) *upstreamWebSocket {
 	socket := &upstreamWebSocket{
-		conn:       connection,
-		generation: generation,
-		accountID:  accountID,
-		events:     make(chan upstreamWebSocketFrame, webSocketUpstreamEventBacklog),
-		done:       make(chan struct{}),
-		stop:       make(chan struct{}),
+		conn:           connection,
+		generation:     generation,
+		accountID:      accountID,
+		events:         make(chan upstreamWebSocketFrame, webSocketUpstreamEventBacklog),
+		done:           make(chan struct{}),
+		stop:           make(chan struct{}),
+		maxQueuedBytes: upstreamWebSocketReadLimit,
 	}
 	connection.SetReadLimit(upstreamWebSocketReadLimit)
 	connection.EnableWriteCompression(false)
@@ -488,12 +495,40 @@ func (s *upstreamWebSocket) readLoop() {
 			}
 			continue
 		}
+		frame := upstreamWebSocketFrame{payload: payload}
+		if !s.reserve(frame) {
+			s.setError(fmt.Errorf("queued upstream WebSocket events exceed %d bytes", s.maxQueuedBytes))
+			return
+		}
 		select {
-		case s.events <- upstreamWebSocketFrame{payload: payload}:
+		case s.events <- frame:
 		case <-s.stop:
+			s.release(frame)
 			return
 		}
 	}
+}
+
+func (s *upstreamWebSocket) reserve(frame upstreamWebSocketFrame) bool {
+	if s == nil || s.maxQueuedBytes <= 0 {
+		return false
+	}
+	size := int64(len(frame.payload))
+	if size > s.maxQueuedBytes {
+		return false
+	}
+	if total := s.queuedBytes.Add(size); total > s.maxQueuedBytes {
+		s.queuedBytes.Add(-size)
+		return false
+	}
+	return true
+}
+
+func (s *upstreamWebSocket) release(frame upstreamWebSocketFrame) {
+	if s == nil {
+		return
+	}
+	s.queuedBytes.Add(-int64(len(frame.payload)))
 }
 
 func (s *upstreamWebSocket) pingLoop() {

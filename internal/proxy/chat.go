@@ -51,7 +51,7 @@ func (s *Service) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, "account_unavailable", accountUnavailableClientMessage, requestID)
 		return
 	}
-	body, err = prepareCodexHTTPBody(body, model, credential.PlanType, r.Header)
+	body, err = prepareCodexChatBody(body, model, credential.PlanType, r.Header)
 	if err != nil {
 		status, errText = http.StatusInternalServerError, err.Error()
 		writeError(w, status, "request_failed", errText, requestID)

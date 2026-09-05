@@ -19,6 +19,14 @@ const (
 )
 
 func prepareCodexHTTPBody(body []byte, model, planType string, headers http.Header) ([]byte, error) {
+	return prepareCodexHTTPBodyWithImageTool(body, model, planType, headers, true)
+}
+
+func prepareCodexChatBody(body []byte, model, planType string, headers http.Header) ([]byte, error) {
+	return prepareCodexHTTPBodyWithImageTool(body, model, planType, headers, false)
+}
+
+func prepareCodexHTTPBodyWithImageTool(body []byte, model, planType string, headers http.Header, includeImageTool bool) ([]byte, error) {
 	object, err := decodeJSONObject(body)
 	if err != nil {
 		return nil, err
@@ -26,7 +34,7 @@ func prepareCodexHTTPBody(body []byte, model, planType string, headers http.Head
 	for _, field := range []string{"previous_response_id", "generate", "safety_identifier", "stream_options"} {
 		delete(object, field)
 	}
-	prepareCodexInferenceObject(object, model, planType, headers, false)
+	prepareCodexInferenceObject(object, model, planType, headers, false, includeImageTool)
 	return encodeCodexObject(object)
 }
 
@@ -36,12 +44,14 @@ func prepareCodexWebSocketBody(body []byte, model, planType string, headers http
 		return nil, err
 	}
 	delete(object, "safety_identifier")
-	prepareCodexInferenceObject(object, model, planType, headers, true)
+	prepareCodexInferenceObject(object, model, planType, headers, true, true)
 	return encodeCodexObject(object)
 }
 
-func prepareCodexInferenceObject(object map[string]any, model, planType string, headers http.Header, websocketTransport bool) {
-	ensureCodexImageGenerationTool(object, model, planType, headers)
+func prepareCodexInferenceObject(object map[string]any, model, planType string, headers http.Header, websocketTransport, includeImageTool bool) {
+	if includeImageTool {
+		ensureCodexImageGenerationTool(object, model, planType, headers)
+	}
 	sanitizeCodexInputItems(object)
 	normalizeCodexParallelToolCalls(object, headers, websocketTransport)
 }
