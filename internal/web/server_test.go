@@ -588,6 +588,11 @@ func TestV1ResponsesWebSocketFallsBackToHTTPBeforeSubmission(t *testing.T) {
 		if _, exists := body["type"]; exists {
 			t.Errorf("HTTP fallback retained WebSocket type: %#v", body)
 		}
+		for _, field := range []string{"generate", "stream_options", "parallel_tool_calls"} {
+			if _, exists := body[field]; exists {
+				t.Errorf("HTTP fallback retained %s: %#v", field, body)
+			}
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, "event: response.completed\n"+
 			"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_http\",\"output\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}}\n\n")
@@ -606,7 +611,7 @@ func TestV1ResponsesWebSocketFallsBackToHTTPBeforeSubmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer connection.Close()
-	if err = connection.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"gpt-test","input":"fallback"}`)); err != nil {
+	if err = connection.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"gpt-test-spark","input":"fallback","generate":true,"stream_options":{"include_usage":true},"parallel_tool_calls":true}`)); err != nil {
 		t.Fatal(err)
 	}
 	_, payload, err := connection.ReadMessage()

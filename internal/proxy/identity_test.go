@@ -145,3 +145,25 @@ func TestWebSocketIdentityRejectsSessionChange(t *testing.T) {
 		t.Fatal("active WebSocket accepted a prompt_cache_key change")
 	}
 }
+
+func TestExposePayloadEscapesRestoredIdentityForJSON(t *testing.T) {
+	upstreamID := "3b5b6900-5e7a-5eb8-a62a-96e79b4f9e31"
+	clientID := "client-\"quote\\slash\ttab"
+	identity := &codexIdentity{
+		remap:   true,
+		reverse: map[string]string{upstreamID: clientID},
+	}
+	exposed := identity.exposePayload([]byte(`{"id":"prefix-` + upstreamID + `-suffix"}`))
+	if !json.Valid(exposed) {
+		t.Fatalf("restored payload is invalid JSON: %s", exposed)
+	}
+	var decoded struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(exposed, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.ID != "prefix-"+clientID+"-suffix" {
+		t.Fatalf("restored identity = %q", decoded.ID)
+	}
+}

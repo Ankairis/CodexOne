@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -108,6 +109,7 @@ func (s *Service) ResponsesWebSocket(w http.ResponseWriter, r *http.Request) {
 		case <-sessionCtx.Done():
 			return
 		case message := <-inbox.messages:
+			inbox.release(message)
 			result := session.handleTurn(sessionCtx, message.payload)
 			s.record(r, result.requestID, result.model, result.status, result.started,
 				result.usage.InputTokens, result.usage.OutputTokens, result.telemetry, result.errText)
@@ -177,7 +179,7 @@ func (s *responsesWebSocketSession) handleTurn(ctx context.Context, raw []byte) 
 	upstream, dialFailure := s.ensureUpstream(ctx, plan.identity, credential)
 	if upstream == nil {
 		if s.service.cfg.CodexWSHTTPFallback {
-			return s.executeHTTPFallback(ctx, plan, result, dialFailure)
+			return s.executeHTTPFallback(ctx, plan, result, dialFailure, credential)
 		}
 		result.status = firstPositive(dialFailure.status, http.StatusBadGateway)
 		result.errText = firstNonEmpty(dialFailure.message, "upstream WebSocket is unavailable")
@@ -284,17 +286,17 @@ func (s *responsesWebSocketSession) forwardWebSocketTurn(ctx context.Context, up
 	}
 }
 
-func (s *responsesWebSocketSession) executeHTTPFallback(ctx context.Context, plan webSocketTurnPlan, result webSocketTurnResult, dialFailure upstreamDialFailure) webSocketTurnResult {
+func (s *responsesWebSocketSession) executeHTTPFallback(ctx context.Context, plan webSocketTurnPlan, result webSocketTurnResult, dialFailure upstreamDialFailure, credential codex.Credential) webSocketTurnResult {
 	body, err := removeWebSocketType(s.conversation.bodyFor(plan, 0, true))
 	if err != nil {
 		result.status, result.errText = http.StatusInternalServerError, err.Error()
 		_ = s.downstream.writeError("request_failed", result.errText, result.requestID, result.status)
 		return result
 	}
-	credential, err := s.service.auth.FreshCredential(ctx)
+	body, err = prepareCodexHTTPBody(body, plan.model, credential.PlanType, s.request.Header)
 	if err != nil {
-		result.status, result.errText = http.StatusServiceUnavailable, err.Error()
-		_ = s.downstream.writeError("account_unavailable", accountUnavailableClientMessage, result.requestID, result.status)
+		result.status, result.errText = http.StatusInternalServerError, err.Error()
+		_ = s.downstream.writeError("request_failed", result.errText, result.requestID, result.status)
 		return result
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.service.cfg.UpstreamBaseURL+"/backend-api/codex/responses", bytes.NewReader(body))
@@ -573,16 +575,19 @@ type downstreamWebSocketMessage struct {
 }
 
 type downstreamWebSocketInbox struct {
-	messages chan downstreamWebSocketMessage
-	done     chan struct{}
-	errMu    sync.RWMutex
-	err      error
+	messages       chan downstreamWebSocketMessage
+	done           chan struct{}
+	maxQueuedBytes int64
+	queuedBytes    atomic.Int64
+	errMu          sync.RWMutex
+	err            error
 }
 
 func newDownstreamWebSocketInbox(connection *websocket.Conn, readLimit int64) *downstreamWebSocketInbox {
 	inbox := &downstreamWebSocketInbox{
-		messages: make(chan downstreamWebSocketMessage, webSocketClientQueueSize),
-		done:     make(chan struct{}),
+		messages:       make(chan downstreamWebSocketMessage, webSocketClientQueueSize),
+		done:           make(chan struct{}),
+		maxQueuedBytes: readLimit,
 	}
 	connection.SetReadLimit(readLimit)
 	_ = connection.SetReadDeadline(time.Now().Add(webSocketFirstMessageTimeout))
@@ -605,9 +610,16 @@ func newDownstreamWebSocketInbox(connection *websocket.Conn, readLimit int64) *d
 			if messageType != websocket.TextMessage && messageType != websocket.BinaryMessage {
 				continue
 			}
+			message := downstreamWebSocketMessage{payload: payload}
+			if !inbox.reserve(message) {
+				inbox.setError(fmt.Errorf("queued WebSocket requests exceed %d bytes", inbox.maxQueuedBytes))
+				_ = connection.Close()
+				return
+			}
 			select {
-			case inbox.messages <- downstreamWebSocketMessage{payload: payload}:
+			case inbox.messages <- message:
 			default:
+				inbox.release(message)
 				inbox.setError(fmt.Errorf("too many queued WebSocket requests"))
 				_ = connection.Close()
 				return
@@ -615,6 +627,28 @@ func newDownstreamWebSocketInbox(connection *websocket.Conn, readLimit int64) *d
 		}
 	}()
 	return inbox
+}
+
+func (i *downstreamWebSocketInbox) reserve(message downstreamWebSocketMessage) bool {
+	if i == nil || i.maxQueuedBytes <= 0 {
+		return false
+	}
+	size := int64(len(message.payload))
+	if size > i.maxQueuedBytes {
+		return false
+	}
+	if total := i.queuedBytes.Add(size); total > i.maxQueuedBytes {
+		i.queuedBytes.Add(-size)
+		return false
+	}
+	return true
+}
+
+func (i *downstreamWebSocketInbox) release(message downstreamWebSocketMessage) {
+	if i == nil {
+		return
+	}
+	i.queuedBytes.Add(-int64(len(message.payload)))
 }
 
 func (i *downstreamWebSocketInbox) setError(err error) {

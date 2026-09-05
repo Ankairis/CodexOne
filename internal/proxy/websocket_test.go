@@ -134,6 +134,29 @@ func TestWebSocketRegistryRejectsConnectionsAfterShutdown(t *testing.T) {
 	}
 }
 
+func TestDownstreamWebSocketInboxBoundsQueuedBytes(t *testing.T) {
+	inbox := &downstreamWebSocketInbox{maxQueuedBytes: 10}
+	first := downstreamWebSocketMessage{payload: []byte("123456")}
+	second := downstreamWebSocketMessage{payload: []byte("12345")}
+	if !inbox.reserve(first) {
+		t.Fatal("first message did not fit within the byte budget")
+	}
+	if inbox.reserve(second) {
+		t.Fatal("aggregate queue exceeded its byte budget")
+	}
+	if got := inbox.queuedBytes.Load(); got != 6 {
+		t.Fatalf("queued bytes = %d, want 6", got)
+	}
+	inbox.release(first)
+	if !inbox.reserve(second) {
+		t.Fatal("released capacity was not reusable")
+	}
+	inbox.release(second)
+	if got := inbox.queuedBytes.Load(); got != 0 {
+		t.Fatalf("queued bytes after release = %d, want 0", got)
+	}
+}
+
 func mustJSON(value any) []byte {
 	encoded, _ := json.Marshal(value)
 	return encoded

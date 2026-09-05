@@ -282,7 +282,11 @@ func (i *codexIdentity) exposePayload(payload []byte) []byte {
 	i.mu.RUnlock()
 	out := payload
 	for _, key := range keys {
-		out = bytes.ReplaceAll(out, []byte(key), []byte(reverse[key]))
+		encoded, err := json.Marshal(reverse[key])
+		if err != nil || len(encoded) < 2 {
+			continue
+		}
+		out = bytes.ReplaceAll(out, []byte(key), encoded[1:len(encoded)-1])
 	}
 	return out
 }
