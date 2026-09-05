@@ -20,6 +20,7 @@ import (
 	"github.com/Ankairis/CodexOne/internal/config"
 	"github.com/Ankairis/CodexOne/internal/security"
 	"github.com/Ankairis/CodexOne/internal/store"
+	"github.com/Ankairis/CodexOne/internal/upstream"
 )
 
 type apiKeyContextKey struct{}
@@ -48,6 +49,7 @@ type Service struct {
 	activeRequests int
 	shuttingDown   bool
 	idle           chan struct{}
+	websockets     websocketRegistry
 }
 
 func New(cfg config.Config, auth *codex.Manager, database *store.Store, logger *slog.Logger) *Service {
@@ -58,7 +60,7 @@ func New(cfg config.Config, auth *codex.Manager, database *store.Store, logger *
 		auth:   auth,
 		store:  database,
 		logger: logger,
-		client: &http.Client{},
+		client: upstream.NewHTTPClient(0, cfg.CodexChromeTLS),
 		idle:   idle,
 	}
 }
@@ -185,6 +187,7 @@ func (s *Service) BeginShutdown() {
 	s.activityMu.Lock()
 	s.shuttingDown = true
 	s.activityMu.Unlock()
+	s.websockets.closeAll()
 }
 
 // WaitForIdle returns only after every accepted proxy handler has completed,
@@ -227,11 +230,23 @@ func (s *Service) handleResponsesPath(w http.ResponseWriter, r *http.Request, up
 		writeError(w, status, "invalid_request", errText, requestID)
 		return
 	}
+	body, identity, err := prepareRequestIdentity(r.Context(), r.Header, body, s.cfg.CodexIdentityRemap)
+	if err != nil {
+		status, errText = http.StatusBadRequest, err.Error()
+		writeError(w, status, "invalid_request", errText, requestID)
+		return
+	}
 	telemetry.ReasoningEffort = reasoningEffortFromBody(body)
 	credential, err := s.auth.FreshCredential(r.Context())
 	if err != nil {
 		status, errText = http.StatusServiceUnavailable, err.Error()
 		writeError(w, status, "account_unavailable", accountUnavailableClientMessage, requestID)
+		return
+	}
+	body, err = prepareCodexHTTPBody(body, model, credential.PlanType, r.Header)
+	if err != nil {
+		status, errText = http.StatusInternalServerError, err.Error()
+		writeError(w, status, "request_failed", errText, requestID)
 		return
 	}
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, s.cfg.UpstreamBaseURL+upstreamPath, bytes.NewReader(body))
@@ -242,6 +257,7 @@ func (s *Service) handleResponsesPath(w http.ResponseWriter, r *http.Request, up
 	}
 	upstreamReq.Header.Set("Content-Type", "application/json")
 	copyCodexContextHeaders(upstreamReq.Header, r.Header)
+	identity.applyHeaders(upstreamReq.Header, r.Header, false)
 	s.auth.ApplyCodexHeaders(upstreamReq, credential, "text/event-stream")
 
 	resp, err := s.client.Do(upstreamReq)
@@ -254,6 +270,7 @@ func (s *Service) handleResponsesPath(w http.ResponseWriter, r *http.Request, up
 	copyQuotaHeaders(w.Header(), resp.Header)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		rawError, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+		rawError = identity.exposePayload(rawError)
 		status, errText = resp.StatusCode, compactError(rawError)
 		writeUpstreamError(w, resp, rawError, requestID)
 		return
@@ -262,12 +279,12 @@ func (s *Service) handleResponsesPath(w http.ResponseWriter, r *http.Request, up
 	if requestedStream {
 		var usage tokenUsage
 		var observed requestTelemetry
-		status, usage, observed, errText = s.streamResponse(w, resp, requestID, started)
+		status, usage, observed, errText = s.streamResponse(w, resp, requestID, started, identity)
 		inputTokens, outputTokens = usage.InputTokens, usage.OutputTokens
 		telemetry.mergeResponse(observed, usage)
 		return
 	}
-	final, usage, err := collectResponse(resp.Body)
+	final, usage, err := collectResponse(resp.Body, identity)
 	if err != nil {
 		var failure *upstreamResponseError
 		if errors.As(err, &failure) {
@@ -302,6 +319,12 @@ func (s *Service) handlePassthroughJSON(w http.ResponseWriter, r *http.Request, 
 	}
 	_ = json.Unmarshal(body, &metadata)
 	model = metadata.Model
+	body, identity, err := prepareRequestIdentity(r.Context(), r.Header, body, s.cfg.CodexIdentityRemap)
+	if err != nil {
+		status, errText = http.StatusBadRequest, err.Error()
+		writeError(w, status, "invalid_request", errText, requestID)
+		return
+	}
 	credential, err := s.auth.FreshCredential(r.Context())
 	if err != nil {
 		status, errText = http.StatusServiceUnavailable, err.Error()
@@ -316,6 +339,7 @@ func (s *Service) handlePassthroughJSON(w http.ResponseWriter, r *http.Request, 
 	}
 	req.Header.Set("Content-Type", "application/json")
 	copyCodexContextHeaders(req.Header, r.Header)
+	identity.applyHeaders(req.Header, r.Header, false)
 	s.auth.ApplyCodexHeaders(req, credential, "application/json")
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -330,6 +354,7 @@ func (s *Service) handlePassthroughJSON(w http.ResponseWriter, r *http.Request, 
 		writeError(w, status, "upstream_read_failed", errText, requestID)
 		return
 	}
+	raw = identity.exposePayload(raw)
 	copyQuotaHeaders(w.Header(), resp.Header)
 	status = resp.StatusCode
 	if status < 200 || status >= 300 {
@@ -341,7 +366,7 @@ func (s *Service) handlePassthroughJSON(w http.ResponseWriter, r *http.Request, 
 	_, _ = w.Write(raw)
 }
 
-func (s *Service) streamResponse(w http.ResponseWriter, resp *http.Response, requestID string, started time.Time) (int, tokenUsage, requestTelemetry, string) {
+func (s *Service) streamResponse(w http.ResponseWriter, resp *http.Response, requestID string, started time.Time, identities ...*codexIdentity) (int, tokenUsage, requestTelemetry, string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming_unsupported", "server does not support streaming", requestID)
@@ -359,6 +384,9 @@ func (s *Service) streamResponse(w http.ResponseWriter, resp *http.Response, req
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
+			if len(identities) > 0 {
+				line = identities[0].exposePayload(line)
+			}
 			observeSSE(line, &usage, &telemetry, started)
 			if _, writeErr := w.Write(line); writeErr != nil {
 				return 499, usage, telemetry, "client disconnected"
@@ -461,7 +489,7 @@ type tokenUsage struct {
 	EffectiveReasoningEffort string
 }
 
-func collectResponse(reader io.Reader) ([]byte, tokenUsage, error) {
+func collectResponse(reader io.Reader, identities ...*codexIdentity) ([]byte, tokenUsage, error) {
 	buffered := bufio.NewReader(reader)
 	var final []byte
 	usage := tokenUsage{}
@@ -469,6 +497,9 @@ func collectResponse(reader io.Reader) ([]byte, tokenUsage, error) {
 	for {
 		line, err := buffered.ReadBytes('\n')
 		if len(line) > 0 {
+			if len(identities) > 0 {
+				line = identities[0].exposePayload(line)
+			}
 			payload := ssePayload(line)
 			if len(payload) > 0 && !bytes.Equal(payload, []byte("[DONE]")) {
 				var event struct {
@@ -628,6 +659,10 @@ func observeSSE(line []byte, usage *tokenUsage, telemetry *requestTelemetry, sta
 	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
 		return
 	}
+	observeResponsePayload(payload, usage, telemetry, started)
+}
+
+func observeResponsePayload(payload []byte, usage *tokenUsage, telemetry *requestTelemetry, started time.Time) {
 	var event struct {
 		Type     string          `json:"type"`
 		Delta    string          `json:"delta"`
@@ -695,7 +730,8 @@ func ssePayload(line []byte) []byte {
 func copyCodexContextHeaders(target, source http.Header) {
 	for _, name := range []string{
 		"X-Codex-Beta-Features", "X-Codex-Turn-Metadata", "X-Client-Request-Id", "X-Codex-Window-Id",
-		"Thread-Id", "Session-Id", "X-OpenAI-Internal-Codex-Responses-Lite",
+		"X-Codex-Turn-State", "X-ResponsesAPI-Include-Timing-Metrics", "Thread-Id", "Session-Id",
+		"Session_id", "Conversation_id", "X-OpenAI-Internal-Codex-Responses-Lite",
 	} {
 		if value := strings.TrimSpace(source.Get(name)); value != "" && !strings.ContainsAny(value, "\r\n") {
 			target.Set(name, value)

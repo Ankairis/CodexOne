@@ -8,6 +8,7 @@ import (
 func TestLoadDefaultSQLiteConfigurationIncludesTimezoneData(t *testing.T) {
 	for _, name := range []string{
 		"CODEX_CLIENT_VERSION", "CODEX_USER_AGENT", "LISTEN_ADDR", "PUBLIC_URL", "STORAGE_DRIVER",
+		"CODEX_CHROME_TLS", "CODEX_IDENTITY_REMAP", "CODEX_WEBSOCKET_HTTP_FALLBACK",
 		"DATABASE_URL", "REDIS_URL", "MASTER_KEY", "ADMIN_PASSWORD", "OPENAI_UPSTREAM_BASE_URL",
 		"REQUEST_RETENTION_DAYS", "MAX_REQUEST_MIB", "SESSION_TTL_HOURS", "APP_TIMEZONE", "TRUSTED_PROXY_CIDRS",
 	} {
@@ -24,8 +25,40 @@ func TestLoadDefaultSQLiteConfigurationIncludesTimezoneData(t *testing.T) {
 	if cfg.StorageDriver != "sqlite" || cfg.Location.String() != "Asia/Shanghai" {
 		t.Fatalf("configuration = %#v", cfg)
 	}
-	if cfg.CodexUserAgent == "" || cfg.CodexClientVersion != "0.146.0" {
+	if cfg.CodexUserAgent == "" || cfg.CodexClientVersion != "0.146.0" || !cfg.CodexChromeTLS ||
+		!cfg.CodexIdentityRemap || !cfg.CodexWSHTTPFallback {
 		t.Fatalf("Codex identity was not initialized: %#v", cfg)
+	}
+}
+
+func TestLoadCanDisableChromeTLS(t *testing.T) {
+	t.Setenv("PUBLIC_URL", "http://localhost:8080")
+	t.Setenv("CODEX_CHROME_TLS", "false")
+	t.Setenv("SQLITE_PATH", filepath.Join(t.TempDir(), "codexone.db"))
+	t.Setenv("MASTER_KEY_FILE", filepath.Join(t.TempDir(), "master.key"))
+	t.Setenv("LOG_PATH", filepath.Join(t.TempDir(), "codexone.log"))
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CodexChromeTLS {
+		t.Fatal("CODEX_CHROME_TLS=false was ignored")
+	}
+}
+
+func TestLoadCanDisableIdentityRemapAndWebSocketFallback(t *testing.T) {
+	t.Setenv("PUBLIC_URL", "http://localhost:8080")
+	t.Setenv("CODEX_IDENTITY_REMAP", "false")
+	t.Setenv("CODEX_WEBSOCKET_HTTP_FALLBACK", "false")
+	t.Setenv("SQLITE_PATH", filepath.Join(t.TempDir(), "codexone.db"))
+	t.Setenv("MASTER_KEY_FILE", filepath.Join(t.TempDir(), "master.key"))
+	t.Setenv("LOG_PATH", filepath.Join(t.TempDir(), "codexone.log"))
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CodexIdentityRemap || cfg.CodexWSHTTPFallback {
+		t.Fatalf("optional safeguards were not disabled: %#v", cfg)
 	}
 }
 

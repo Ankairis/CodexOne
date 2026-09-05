@@ -25,6 +25,9 @@ type Config struct {
 	LogPath              string
 	CodexClientVersion   string
 	CodexUserAgent       string
+	CodexChromeTLS       bool
+	CodexIdentityRemap   bool
+	CodexWSHTTPFallback  bool
 	UpstreamBaseURL      string
 	RequestRetentionDays int
 	MaxRequestBytes      int64
@@ -50,6 +53,9 @@ func Load() (Config, error) {
 		LogPath:              env("LOG_PATH", "./data/codexone.log"),
 		CodexClientVersion:   version,
 		CodexUserAgent:       env("CODEX_USER_AGENT", fmt.Sprintf("codex-tui/%s (Mac OS 26.5.0; arm64) iTerm.app/3.6.10 (codex-tui; %s)", version, version)),
+		CodexChromeTLS:       envBool("CODEX_CHROME_TLS", true),
+		CodexIdentityRemap:   envBool("CODEX_IDENTITY_REMAP", true),
+		CodexWSHTTPFallback:  envBool("CODEX_WEBSOCKET_HTTP_FALLBACK", true),
 		UpstreamBaseURL:      strings.TrimRight(env("OPENAI_UPSTREAM_BASE_URL", "https://chatgpt.com"), "/"),
 		RequestRetentionDays: envInt("REQUEST_RETENTION_DAYS", 30),
 		MaxRequestBytes:      int64(envInt("MAX_REQUEST_MIB", 32)) << 20,
@@ -136,6 +142,18 @@ func envInt(name string, fallback int) int {
 	}
 	value, err := strconv.Atoi(raw)
 	if err != nil || value <= 0 {
+		return fallback
+	}
+	return value
+}
+
+func envBool(name string, fallback bool) bool {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
 		return fallback
 	}
 	return value
