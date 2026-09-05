@@ -282,6 +282,16 @@ func (s *Store) FindActiveAPIKeyByHash(ctx context.Context, hash string) (APIKey
 	return key, err
 }
 
+func (s *Store) FindActiveAPIKeyByID(ctx context.Context, id string) (APIKey, error) {
+	var key APIKey
+	var lastUsed sql.NullInt64
+	err := s.db.QueryRowContext(ctx, s.query(`SELECT id, name, prefix, created_at, last_used_at FROM api_keys WHERE id = ? AND revoked_at IS NULL`), id).Scan(
+		&key.ID, &key.Name, &key.Prefix, &key.CreatedAt, &lastUsed,
+	)
+	key.LastUsedAt = nullableInt(lastUsed)
+	return key, err
+}
+
 func (s *Store) TouchAPIKey(ctx context.Context, id string, at int64) error {
 	_, err := s.db.ExecContext(ctx, s.query(`UPDATE api_keys SET last_used_at = ? WHERE id = ?`), at, id)
 	return err

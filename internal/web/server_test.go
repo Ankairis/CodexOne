@@ -295,6 +295,80 @@ func TestV1ResponsesWebSocketRelaysAndAddsIdentity(t *testing.T) {
 	}
 }
 
+func TestV1ResponsesWebSocketRejectsTurnAfterAPIKeyRevocation(t *testing.T) {
+	requests := make(chan struct{}, 2)
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		connection, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer connection.Close()
+		for {
+			if _, _, err = connection.ReadMessage(); err != nil {
+				return
+			}
+			requests <- struct{}{}
+			if err = connection.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"resp_ws","output":[]}}`)); err != nil {
+				return
+			}
+		}
+	}))
+	defer upstream.Close()
+
+	handler, database, apiKey, cleanup := testApplication(t, upstream.URL)
+	defer cleanup()
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	connection, response, err := websocket.DefaultDialer.Dial(
+		"ws"+strings.TrimPrefix(server.URL, "http")+"/v1/responses",
+		http.Header{"Authorization": {"Bearer " + apiKey}},
+	)
+	if err != nil {
+		if response != nil && response.Body != nil {
+			_ = response.Body.Close()
+		}
+		t.Fatal(err)
+	}
+	defer connection.Close()
+
+	if err = connection.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"gpt-test","input":"first"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = connection.ReadMessage(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-requests:
+	case <-time.After(time.Second):
+		t.Fatal("first turn did not reach upstream")
+	}
+	if revoked, revokeErr := database.RevokeAPIKey(context.Background(), "key_fixture"); revokeErr != nil || !revoked {
+		t.Fatalf("revoke API key: revoked=%v err=%v", revoked, revokeErr)
+	}
+
+	if err = connection.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.append","input":"second"}`)); err != nil {
+		t.Fatal(err)
+	}
+	_, payload, err := connection.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(payload), `"code":"invalid_api_key"`) || !strings.Contains(string(payload), `"status":401`) {
+		t.Fatalf("revoked-key response = %s", payload)
+	}
+	if _, _, err = connection.ReadMessage(); err == nil {
+		t.Fatal("WebSocket remained open after its API key was revoked")
+	} else if closeError, ok := err.(*websocket.CloseError); !ok || closeError.Code != websocket.ClosePolicyViolation {
+		t.Fatalf("revoked-key close error = %v", err)
+	}
+	select {
+	case <-requests:
+		t.Fatal("revoked WebSocket turn reached upstream")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func TestV1ResponsesWebSocketReplaysTranscriptAfterUpstreamReconnect(t *testing.T) {
 	type upstreamRequest struct {
 		Connection         int

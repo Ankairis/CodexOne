@@ -1,17 +1,23 @@
 package upstream
 
 import (
+	"bufio"
+	"context"
+	standardtls "crypto/tls"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
 
 	tls "github.com/refraction-networking/utls"
 	"golang.org/x/net/http2"
+	"golang.org/x/net/proxy"
 )
 
 // NewHTTPClient returns the shared outbound client policy used for OpenAI
@@ -22,7 +28,7 @@ func NewHTTPClient(timeout time.Duration, chromeTLS bool) *http.Client {
 	transport := http.RoundTripper(http.DefaultTransport)
 	if chromeTLS {
 		transport = &selectiveRoundTripper{
-			chrome:   &chromeRoundTripper{},
+			chrome:   &chromeRoundTripper{proxy: http.ProxyFromEnvironment},
 			fallback: http.DefaultTransport,
 		}
 	}
@@ -53,7 +59,9 @@ func isChatGPTHTTPS(request *http.Request) bool {
 // chromeRoundTripper performs one request per Chrome-profiled TLS connection.
 // A dedicated connection keeps cancellation and streaming ownership simple and
 // avoids mixing the special transport with requests for any other host.
-type chromeRoundTripper struct{}
+type chromeRoundTripper struct {
+	proxy func(*http.Request) (*url.URL, error)
+}
 
 func (t *chromeRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
 	hostname := request.URL.Hostname()
@@ -62,8 +70,7 @@ func (t *chromeRoundTripper) RoundTrip(request *http.Request) (*http.Response, e
 		address = net.JoinHostPort(hostname, "443")
 	}
 
-	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
-	rawConnection, err := dialer.DialContext(request.Context(), "tcp", address)
+	rawConnection, err := t.dialConnection(request, address)
 	if err != nil {
 		return nil, fmt.Errorf("dial ChatGPT upstream: %w", err)
 	}
@@ -105,6 +112,117 @@ func (t *chromeRoundTripper) RoundTrip(request *http.Request) (*http.Response, e
 		},
 	}
 	return response, nil
+}
+
+func (t *chromeRoundTripper) dialConnection(request *http.Request, address string) (net.Conn, error) {
+	direct := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+	proxyResolver := t.proxy
+	if proxyResolver == nil {
+		proxyResolver = http.ProxyFromEnvironment
+	}
+	proxyURL, err := proxyResolver(request)
+	if err != nil {
+		return nil, fmt.Errorf("resolve ChatGPT upstream proxy: %w", err)
+	}
+	if proxyURL == nil {
+		return direct.DialContext(request.Context(), "tcp", address)
+	}
+
+	switch strings.ToLower(proxyURL.Scheme) {
+	case "http", "https":
+		return dialHTTPConnectProxy(request.Context(), direct, proxyURL, address)
+	case "socks5", "socks5h":
+		proxyDialer, proxyErr := proxy.FromURL(proxyURL, direct)
+		if proxyErr != nil {
+			return nil, fmt.Errorf("configure ChatGPT SOCKS proxy: %w", proxyErr)
+		}
+		contextDialer, ok := proxyDialer.(proxy.ContextDialer)
+		if !ok {
+			return nil, fmt.Errorf("ChatGPT SOCKS proxy does not support context cancellation")
+		}
+		return contextDialer.DialContext(request.Context(), "tcp", address)
+	default:
+		return nil, fmt.Errorf("unsupported ChatGPT upstream proxy scheme %q", proxyURL.Scheme)
+	}
+}
+
+func dialHTTPConnectProxy(ctx context.Context, dialer *net.Dialer, proxyURL *url.URL, address string) (net.Conn, error) {
+	proxyAddress := proxyURL.Host
+	if _, _, err := net.SplitHostPort(proxyAddress); err != nil {
+		port := "80"
+		if strings.EqualFold(proxyURL.Scheme, "https") {
+			port = "443"
+		}
+		proxyAddress = net.JoinHostPort(proxyURL.Hostname(), port)
+	}
+	connection, err := dialer.DialContext(ctx, "tcp", proxyAddress)
+	if err != nil {
+		return nil, fmt.Errorf("dial ChatGPT upstream proxy: %w", err)
+	}
+	closeConnection := true
+	defer func() {
+		if closeConnection {
+			_ = connection.Close()
+		}
+	}()
+	if strings.EqualFold(proxyURL.Scheme, "https") {
+		tlsConnection := standardtls.Client(connection, &standardtls.Config{ServerName: proxyURL.Hostname(), MinVersion: standardtls.VersionTLS12})
+		if err = tlsConnection.HandshakeContext(ctx); err != nil {
+			return nil, fmt.Errorf("handshake with ChatGPT upstream proxy: %w", err)
+		}
+		connection = tlsConnection
+	}
+
+	connectRequest := &http.Request{
+		Method: http.MethodConnect,
+		URL:    &url.URL{Opaque: address},
+		Host:   address,
+		Header: make(http.Header),
+	}
+	connectRequest.Header.Set("User-Agent", "CodexOne")
+	if proxyURL.User != nil {
+		password, _ := proxyURL.User.Password()
+		credentials := proxyURL.User.Username() + ":" + password
+		connectRequest.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(credentials)))
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
+		deadline = contextDeadline
+	}
+	if err = connection.SetDeadline(deadline); err != nil {
+		return nil, fmt.Errorf("set ChatGPT upstream proxy deadline: %w", err)
+	}
+	if err = connectRequest.Write(connection); err != nil {
+		return nil, fmt.Errorf("send ChatGPT upstream proxy CONNECT: %w", err)
+	}
+	reader := bufio.NewReader(connection)
+	response, err := http.ReadResponse(reader, connectRequest)
+	if err != nil {
+		return nil, fmt.Errorf("read ChatGPT upstream proxy CONNECT: %w", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		if response.Body != nil {
+			_ = response.Body.Close()
+		}
+		return nil, fmt.Errorf("ChatGPT upstream proxy CONNECT returned %s", response.Status)
+	}
+	if err = connection.SetDeadline(time.Time{}); err != nil {
+		return nil, fmt.Errorf("clear ChatGPT upstream proxy deadline: %w", err)
+	}
+	closeConnection = false
+	if reader.Buffered() > 0 {
+		return &bufferedConnection{Conn: connection, reader: reader}, nil
+	}
+	return connection, nil
+}
+
+type bufferedConnection struct {
+	net.Conn
+	reader *bufio.Reader
+}
+
+func (c *bufferedConnection) Read(buffer []byte) (int, error) {
+	return c.reader.Read(buffer)
 }
 
 type connectionBody struct {

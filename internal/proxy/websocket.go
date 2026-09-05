@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/Ankairis/CodexOne/internal/store"
 	"github.com/gorilla/websocket"
 )
 
@@ -153,6 +154,9 @@ func (s *responsesWebSocketSession) handleTurn(ctx context.Context, raw []byte) 
 		started:   time.Now(),
 		status:    http.StatusOK,
 	}
+	if !s.authorizeTurn(ctx, &result) {
+		return result
+	}
 	account, err := s.service.auth.Account(ctx)
 	if err != nil {
 		result.status, result.errText = http.StatusServiceUnavailable, err.Error()
@@ -191,6 +195,37 @@ func (s *responsesWebSocketSession) handleTurn(ctx context.Context, raw []byte) 
 		return result
 	}
 	return s.forwardWebSocketTurn(ctx, upstream, plan, result)
+}
+
+func (s *responsesWebSocketSession) authorizeTurn(ctx context.Context, result *webSocketTurnResult) bool {
+	key, ok := APIKeyFromContext(s.request.Context())
+	if !ok || strings.TrimSpace(key.ID) == "" {
+		result.status = http.StatusUnauthorized
+		result.errText = "API key is missing from the WebSocket session"
+		result.fatal = true
+		result.closeCode = websocket.ClosePolicyViolation
+		result.closeReason = "API key is invalid or revoked"
+		_ = s.downstream.writeError("invalid_api_key", result.closeReason, result.requestID, result.status)
+		return false
+	}
+	active, err := s.service.store.FindActiveAPIKeyByID(ctx, key.ID)
+	if err != nil {
+		if store.IsNotFound(err) {
+			result.status = http.StatusUnauthorized
+			result.errText = "API key is invalid or revoked"
+			result.fatal = true
+			result.closeCode = websocket.ClosePolicyViolation
+			result.closeReason = result.errText
+			_ = s.downstream.writeError("invalid_api_key", result.errText, result.requestID, result.status)
+			return false
+		}
+		result.status = http.StatusServiceUnavailable
+		result.errText = err.Error()
+		_ = s.downstream.writeError("database_unavailable", "API key storage is unavailable", result.requestID, result.status)
+		return false
+	}
+	_ = s.service.store.TouchAPIKey(ctx, active.ID, time.Now().UnixMilli())
+	return true
 }
 
 func (s *responsesWebSocketSession) forwardWebSocketTurn(ctx context.Context, upstream *upstreamWebSocket, plan webSocketTurnPlan, result webSocketTurnResult) webSocketTurnResult {
