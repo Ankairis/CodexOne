@@ -1,11 +1,15 @@
 package proxy
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/Ankairis/CodexOne/internal/store"
 )
 
 func TestPrepareCodexHTTPBodyMatchesUpstreamPolicy(t *testing.T) {
@@ -208,5 +212,62 @@ func TestSanitizeCodexReasoningAndInputIDs(t *testing.T) {
 	customID, _ := items[2].(map[string]any)["id"].(string)
 	if !strings.HasPrefix(customID, "ctc_") || len([]rune(customID)) > codexInputItemIDLimit {
 		t.Fatalf("custom tool id = %q", customID)
+	}
+}
+
+func TestSanitizeCodexInputIDsArePrivateAndReversible(t *testing.T) {
+	ctx := WithAPIKey(context.Background(), store.APIKey{ID: "key_private"})
+	body := []byte(`{"model":"gpt-test","input":[{"type":"message","id":"tenant/item-42","role":"user","content":"hello"}]}`)
+	prepared, identity, err := prepareRequestIdentity(ctx, nil, body, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err = prepareCodexHTTPBody(prepared, "gpt-test", "free", nil, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request struct {
+		Input []struct {
+			ID string `json:"id"`
+		} `json:"input"`
+	}
+	if err = json.Unmarshal(prepared, &request); err != nil {
+		t.Fatal(err)
+	}
+	if len(request.Input) != 1 || !strings.HasPrefix(request.Input[0].ID, "msg_") || strings.Contains(request.Input[0].ID, "tenant") {
+		t.Fatalf("normalized item ID = %#v", request.Input)
+	}
+	exposed := identity.exposePayload([]byte(`{"item_id":"` + request.Input[0].ID + `"}`))
+	if string(exposed) != `{"item_id":"tenant/item-42"}` {
+		t.Fatalf("restored item ID = %s", exposed)
+	}
+}
+
+func TestSanitizeCodexOverlongCanonicalIDIsReversible(t *testing.T) {
+	ctx := WithAPIKey(context.Background(), store.APIKey{ID: "key_private"})
+	clientID := "msg_" + strings.Repeat("x", 80)
+	body := []byte(fmt.Sprintf(`{"model":"gpt-test","input":[{"type":"message","id":%q,"role":"user","content":"hello"}]}`, clientID))
+	prepared, identity, err := prepareRequestIdentity(ctx, nil, body, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err = prepareCodexHTTPBody(prepared, "gpt-test", "free", nil, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request struct {
+		Input []struct {
+			ID string `json:"id"`
+		} `json:"input"`
+	}
+	if err = json.Unmarshal(prepared, &request); err != nil {
+		t.Fatal(err)
+	}
+	if len(request.Input) != 1 || len([]rune(request.Input[0].ID)) > codexInputItemIDLimit || request.Input[0].ID == clientID {
+		t.Fatalf("normalized overlong ID = %#v", request.Input)
+	}
+	exposed := identity.exposePayload([]byte(`{"item_id":"` + request.Input[0].ID + `"}`))
+	if string(exposed) != `{"item_id":"`+clientID+`"}` {
+		t.Fatalf("restored overlong item ID = %s", exposed)
 	}
 }

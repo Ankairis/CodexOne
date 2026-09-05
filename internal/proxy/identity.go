@@ -17,8 +17,10 @@ import (
 )
 
 const (
-	promptCacheNamespace = "codexone:prompt-cache:"
-	maxIdentityBytes     = 1024
+	promptCacheNamespace    = "codexone:prompt-cache:"
+	maxIdentityBytes        = 1024
+	maxIdentityMappings     = 256
+	maxIdentityMappingBytes = 256 << 10
 )
 
 // codexIdentity owns one downstream conversation's upstream identity. When
@@ -32,8 +34,10 @@ type codexIdentity struct {
 	clientSessionID   string
 	upstreamSessionID string
 
-	mu      sync.RWMutex
-	reverse map[string]string
+	mu           sync.RWMutex
+	reverse      map[string]string
+	mappingBytes int
+	mappingErr   error
 }
 
 // prepareRequestIdentity makes the prompt cache key and transport session
@@ -87,6 +91,9 @@ func newCodexIdentity(ctx context.Context, clientHeaders http.Header, body []byt
 	} else if keyID != "" {
 		identity.upstreamSessionID = stableSessionID(keyID)
 	}
+	if err := identity.mappingError(); err != nil {
+		return nil, err
+	}
 	return identity, nil
 }
 
@@ -112,6 +119,9 @@ func (i *codexIdentity) prepareBody(body []byte, fixed bool) ([]byte, error) {
 
 	if metadata, ok := object["client_metadata"].(map[string]any); ok {
 		i.remapClientMetadata(metadata)
+	}
+	if err = i.mappingError(); err != nil {
+		return nil, err
 	}
 	encoded, err := json.Marshal(object)
 	if err != nil {
@@ -156,9 +166,9 @@ func (i *codexIdentity) remapClientMetadata(metadata map[string]any) {
 	}
 }
 
-func (i *codexIdentity) applyHeaders(target, source http.Header, websocketTransport bool) {
+func (i *codexIdentity) applyHeaders(target, source http.Header, websocketTransport bool) error {
 	if i == nil || target == nil {
-		return
+		return nil
 	}
 	if i.upstreamSessionID != "" {
 		deleteHeaderFold(target, "Session-Id")
@@ -176,7 +186,7 @@ func (i *codexIdentity) applyHeaders(target, source http.Header, websocketTransp
 		}
 	}
 	if !i.remap || source == nil {
-		return
+		return i.mappingError()
 	}
 	for _, field := range []struct {
 		name string
@@ -195,6 +205,7 @@ func (i *codexIdentity) applyHeaders(target, source http.Header, websocketTransp
 	if value := strings.TrimSpace(source.Get("X-Codex-Turn-Metadata")); value != "" {
 		target.Set("X-Codex-Turn-Metadata", i.remapTurnMetadata(value))
 	}
+	return i.mappingError()
 }
 
 func (i *codexIdentity) remapTurnMetadata(raw string) string {
@@ -258,15 +269,42 @@ func (i *codexIdentity) remember(upstream, client string) {
 		return
 	}
 	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.mappingErr != nil {
+		return
+	}
+	if i.reverse == nil {
+		i.reverse = make(map[string]string)
+	}
+	if existing, exists := i.reverse[upstream]; exists {
+		if existing != client {
+			i.mappingErr = fmt.Errorf("identity mapping collision; start a new request")
+		}
+		return
+	}
+	addedBytes := len(upstream) + len(client)
+	if len(i.reverse) >= maxIdentityMappings || i.mappingBytes+addedBytes > maxIdentityMappingBytes {
+		i.mappingErr = fmt.Errorf("identity mapping budget exceeded; reconnect with a compact transcript")
+		return
+	}
 	i.reverse[upstream] = client
-	i.mu.Unlock()
+	i.mappingBytes += addedBytes
+}
+
+func (i *codexIdentity) mappingError() error {
+	if i == nil {
+		return nil
+	}
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.mappingErr
 }
 
 // exposePayload restores identifiers that the client supplied. Replacements
 // are UUID-sized upstream pseudonyms, so short user strings can never become
 // broad substitutions in generated text.
 func (i *codexIdentity) exposePayload(payload []byte) []byte {
-	if i == nil || !i.remap || len(payload) == 0 {
+	if i == nil || len(payload) == 0 {
 		return payload
 	}
 	i.mu.RLock()

@@ -18,15 +18,15 @@ const (
 	codexResponsesLiteMetadataPath = "ws_request_header_x_openai_internal_codex_responses_lite"
 )
 
-func prepareCodexHTTPBody(body []byte, model, planType string, headers http.Header) ([]byte, error) {
-	return prepareCodexHTTPBodyWithImageTool(body, model, planType, headers, true)
+func prepareCodexHTTPBody(body []byte, model, planType string, headers http.Header, identities ...*codexIdentity) ([]byte, error) {
+	return prepareCodexHTTPBodyWithImageTool(body, model, planType, headers, true, identities...)
 }
 
-func prepareCodexChatBody(body []byte, model, planType string, headers http.Header) ([]byte, error) {
-	return prepareCodexHTTPBodyWithImageTool(body, model, planType, headers, false)
+func prepareCodexChatBody(body []byte, model, planType string, headers http.Header, identities ...*codexIdentity) ([]byte, error) {
+	return prepareCodexHTTPBodyWithImageTool(body, model, planType, headers, false, identities...)
 }
 
-func prepareCodexHTTPBodyWithImageTool(body []byte, model, planType string, headers http.Header, includeImageTool bool) ([]byte, error) {
+func prepareCodexHTTPBodyWithImageTool(body []byte, model, planType string, headers http.Header, includeImageTool bool, identities ...*codexIdentity) ([]byte, error) {
 	object, err := decodeJSONObject(body)
 	if err != nil {
 		return nil, err
@@ -34,26 +34,37 @@ func prepareCodexHTTPBodyWithImageTool(body []byte, model, planType string, head
 	for _, field := range []string{"previous_response_id", "generate", "safety_identifier", "stream_options"} {
 		delete(object, field)
 	}
-	prepareCodexInferenceObject(object, model, planType, headers, false, includeImageTool)
+	if err = prepareCodexInferenceObject(object, model, planType, headers, false, includeImageTool, identities...); err != nil {
+		return nil, err
+	}
 	return encodeCodexObject(object)
 }
 
-func prepareCodexWebSocketBody(body []byte, model, planType string, headers http.Header) ([]byte, error) {
+func prepareCodexWebSocketBody(body []byte, model, planType string, headers http.Header, identities ...*codexIdentity) ([]byte, error) {
 	object, err := decodeJSONObject(body)
 	if err != nil {
 		return nil, err
 	}
 	delete(object, "safety_identifier")
-	prepareCodexInferenceObject(object, model, planType, headers, true, true)
+	if err = prepareCodexInferenceObject(object, model, planType, headers, true, true, identities...); err != nil {
+		return nil, err
+	}
 	return encodeCodexObject(object)
 }
 
-func prepareCodexInferenceObject(object map[string]any, model, planType string, headers http.Header, websocketTransport, includeImageTool bool) {
+func prepareCodexInferenceObject(object map[string]any, model, planType string, headers http.Header, websocketTransport, includeImageTool bool, identities ...*codexIdentity) error {
 	if includeImageTool {
 		ensureCodexImageGenerationTool(object, model, planType, headers)
 	}
-	sanitizeCodexInputItems(object)
+	var identity *codexIdentity
+	if len(identities) > 0 {
+		identity = identities[0]
+	}
+	if err := sanitizeCodexInputItems(object, identity); err != nil {
+		return err
+	}
 	normalizeCodexParallelToolCalls(object, headers, websocketTransport)
+	return nil
 }
 
 func encodeCodexObject(object map[string]any) ([]byte, error) {
@@ -161,10 +172,14 @@ func normalizeCodexParallelToolCalls(object map[string]any, headers http.Header,
 	}
 }
 
-func sanitizeCodexInputItems(object map[string]any) {
+func sanitizeCodexInputItems(object map[string]any, identities ...*codexIdentity) error {
 	items, ok := object["input"].([]any)
 	if !ok {
-		return
+		return nil
+	}
+	var identity *codexIdentity
+	if len(identities) > 0 {
+		identity = identities[0]
 	}
 	store, _ := object["store"].(bool)
 	reserved := make(map[string]struct{}, len(items))
@@ -193,6 +208,9 @@ func sanitizeCodexInputItems(object map[string]any) {
 		itemID, _ := item["id"].(string)
 		if itemID != "" {
 			normalized := canonicalCodexInputItemID(item, itemID)
+			if identity != nil && (normalized != itemID || len([]rune(normalized)) > codexInputItemIDLimit) {
+				normalized = mappedCodexInputItemID(identity, item, itemID)
+			}
 			if _, collides := reserved[normalized]; collides && normalized != itemID {
 				normalized = uniqueCodexInputItemID(normalized, reserved, used)
 			}
@@ -201,12 +219,27 @@ func sanitizeCodexInputItems(object map[string]any) {
 			}
 			if normalized != itemID {
 				item["id"] = normalized
+				if identity != nil {
+					identity.remember(normalized, itemID)
+				}
 			}
 			used[normalized] = struct{}{}
 		}
 		sanitized = append(sanitized, item)
 	}
 	object["input"] = sanitized
+	if identity != nil {
+		return identity.mappingError()
+	}
+	return nil
+}
+
+func mappedCodexInputItemID(identity *codexIdentity, item map[string]any, itemID string) string {
+	prefix := codexInputItemPrefix(item)
+	if prefix == "" {
+		prefix = "item"
+	}
+	return prefix + "_" + identityUUID(identity.keyID, "input-item:"+prefix, itemID)
 }
 
 func sanitizeCodexReasoningItem(item map[string]any, store bool) bool {
@@ -245,24 +278,28 @@ func validCodexReasoningEncryptedContent(value string) bool {
 }
 
 func canonicalCodexInputItemID(item map[string]any, itemID string) string {
-	prefix := ""
-	kind, _ := item["type"].(string)
-	switch kind {
-	case "message":
-		prefix = "msg"
-	case "reasoning":
-		prefix = "rs"
-	case "function_call":
-		prefix = "fc"
-	case "custom_tool_call":
-		prefix = "ctc"
-	case "custom_tool_call_output":
-		prefix = "ctco"
-	}
+	prefix := codexInputItemPrefix(item)
 	if prefix == "" || itemID == "" || strings.HasPrefix(itemID, prefix) {
 		return itemID
 	}
 	return prefix + "_" + itemID
+}
+
+func codexInputItemPrefix(item map[string]any) string {
+	kind, _ := item["type"].(string)
+	switch kind {
+	case "message":
+		return "msg"
+	case "reasoning":
+		return "rs"
+	case "function_call":
+		return "fc"
+	case "custom_tool_call":
+		return "ctc"
+	case "custom_tool_call_output":
+		return "ctco"
+	}
+	return ""
 }
 
 func uniqueCodexInputItemID(itemID string, reserved, used map[string]struct{}) string {

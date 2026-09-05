@@ -107,11 +107,6 @@ func (c *webSocketConversation) prepare(r *http.Request, raw []byte, remap bool,
 	if len(planTypes) > 0 {
 		planType = planTypes[0]
 	}
-	normalized, err = prepareCodexWebSocketBody(normalized, model, planType, r.Header)
-	if err != nil {
-		return webSocketTurnPlan{}, err
-	}
-
 	identity := c.identity
 	if identity == nil {
 		normalized, identity, err = prepareRequestIdentity(r.Context(), r.Header, normalized, remap)
@@ -123,6 +118,10 @@ func (c *webSocketConversation) prepare(r *http.Request, raw []byte, remap bool,
 		if err != nil {
 			return webSocketTurnPlan{}, err
 		}
+	}
+	normalized, err = prepareCodexWebSocketBody(normalized, model, planType, r.Header, identity)
+	if err != nil {
+		return webSocketTurnPlan{}, err
 	}
 	normalizedObject, err := decodeJSONObject(normalized)
 	if err != nil {

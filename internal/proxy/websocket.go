@@ -297,7 +297,7 @@ func (s *responsesWebSocketSession) executeHTTPFallback(ctx context.Context, pla
 		_ = s.downstream.writeError("request_failed", result.errText, result.requestID, result.status)
 		return result
 	}
-	body, err = prepareCodexHTTPBody(body, plan.model, credential.PlanType, s.request.Header)
+	body, err = prepareCodexHTTPBody(body, plan.model, credential.PlanType, s.request.Header, plan.identity)
 	if err != nil {
 		result.status, result.errText = http.StatusInternalServerError, err.Error()
 		_ = s.downstream.writeError("request_failed", result.errText, result.requestID, result.status)
@@ -311,7 +311,11 @@ func (s *responsesWebSocketSession) executeHTTPFallback(ctx context.Context, pla
 	}
 	req.Header.Set("Content-Type", "application/json")
 	copyCodexContextHeaders(req.Header, s.request.Header)
-	plan.identity.applyHeaders(req.Header, s.request.Header, false)
+	if err = plan.identity.applyHeaders(req.Header, s.request.Header, false); err != nil {
+		result.status, result.errText = http.StatusBadRequest, err.Error()
+		_ = s.downstream.writeError("invalid_request", result.errText, result.requestID, result.status)
+		return result
+	}
 	s.service.auth.ApplyCodexHeaders(req, credential, "text/event-stream")
 	response, err := s.service.client.Do(req)
 	if err != nil {
@@ -383,7 +387,9 @@ func (s *responsesWebSocketSession) ensureUpstream(ctx context.Context, identity
 	}
 	headers := make(http.Header)
 	copyCodexContextHeaders(headers, s.request.Header)
-	identity.applyHeaders(headers, s.request.Header, true)
+	if err = identity.applyHeaders(headers, s.request.Header, true); err != nil {
+		return nil, upstreamDialFailure{status: http.StatusBadRequest, message: err.Error()}
+	}
 	headerRequest := &http.Request{Header: headers}
 	s.service.auth.ApplyCodexHeaders(headerRequest, credential, "application/json")
 	headers.Set("OpenAI-Beta", mergeWebSocketBetaHeader(s.request.Header.Get("OpenAI-Beta")))

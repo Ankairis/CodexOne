@@ -51,10 +51,10 @@ func (s *Service) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, "account_unavailable", accountUnavailableClientMessage, requestID)
 		return
 	}
-	body, err = prepareCodexChatBody(body, model, credential.PlanType, r.Header)
+	body, err = prepareCodexChatBody(body, model, credential.PlanType, r.Header, identity)
 	if err != nil {
-		status, errText = http.StatusInternalServerError, err.Error()
-		writeError(w, status, "request_failed", errText, requestID)
+		status, errText = http.StatusBadRequest, err.Error()
+		writeError(w, status, "invalid_request", errText, requestID)
 		return
 	}
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, s.cfg.UpstreamBaseURL+"/backend-api/codex/responses", bytes.NewReader(body))
@@ -65,7 +65,11 @@ func (s *Service) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	upstreamReq.Header.Set("Content-Type", "application/json")
 	copyCodexContextHeaders(upstreamReq.Header, r.Header)
-	identity.applyHeaders(upstreamReq.Header, r.Header, false)
+	if err = identity.applyHeaders(upstreamReq.Header, r.Header, false); err != nil {
+		status, errText = http.StatusBadRequest, err.Error()
+		writeError(w, status, "invalid_request", errText, requestID)
+		return
+	}
 	s.auth.ApplyCodexHeaders(upstreamReq, credential, "text/event-stream")
 	resp, err := s.client.Do(upstreamReq)
 	if err != nil {

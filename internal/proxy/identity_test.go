@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -82,7 +83,9 @@ func TestIdentityRemapIsStableSeparatedAndReversible(t *testing.T) {
 	}
 
 	upstreamHeaders := headers.Clone()
-	identity.applyHeaders(upstreamHeaders, headers, true)
+	if err = identity.applyHeaders(upstreamHeaders, headers, true); err != nil {
+		t.Fatal(err)
+	}
 	mapped := []string{
 		identity.sessionID(),
 		upstreamHeaders.Get("Thread-Id"),
@@ -165,5 +168,22 @@ func TestExposePayloadEscapesRestoredIdentityForJSON(t *testing.T) {
 	}
 	if decoded.ID != "prefix-"+clientID+"-suffix" {
 		t.Fatalf("restored identity = %q", decoded.ID)
+	}
+}
+
+func TestIdentityMappingBudgetIsBounded(t *testing.T) {
+	identity := &codexIdentity{remap: true, reverse: make(map[string]string)}
+	for index := 0; index < maxIdentityMappings; index++ {
+		identity.remember(fmt.Sprintf("upstream-%d", index), fmt.Sprintf("client-%d", index))
+	}
+	if err := identity.mappingError(); err != nil {
+		t.Fatalf("mapping budget failed early: %v", err)
+	}
+	identity.remember("upstream-overflow", "client-overflow")
+	if err := identity.mappingError(); err == nil {
+		t.Fatal("identity mapping budget accepted an unbounded entry")
+	}
+	if got := len(identity.reverse); got != maxIdentityMappings {
+		t.Fatalf("remembered mappings = %d, want %d", got, maxIdentityMappings)
 	}
 }

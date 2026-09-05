@@ -243,10 +243,10 @@ func (s *Service) handleResponsesPath(w http.ResponseWriter, r *http.Request, up
 		writeError(w, status, "account_unavailable", accountUnavailableClientMessage, requestID)
 		return
 	}
-	body, err = prepareCodexHTTPBody(body, model, credential.PlanType, r.Header)
+	body, err = prepareCodexHTTPBody(body, model, credential.PlanType, r.Header, identity)
 	if err != nil {
-		status, errText = http.StatusInternalServerError, err.Error()
-		writeError(w, status, "request_failed", errText, requestID)
+		status, errText = http.StatusBadRequest, err.Error()
+		writeError(w, status, "invalid_request", errText, requestID)
 		return
 	}
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, s.cfg.UpstreamBaseURL+upstreamPath, bytes.NewReader(body))
@@ -257,7 +257,11 @@ func (s *Service) handleResponsesPath(w http.ResponseWriter, r *http.Request, up
 	}
 	upstreamReq.Header.Set("Content-Type", "application/json")
 	copyCodexContextHeaders(upstreamReq.Header, r.Header)
-	identity.applyHeaders(upstreamReq.Header, r.Header, false)
+	if err = identity.applyHeaders(upstreamReq.Header, r.Header, false); err != nil {
+		status, errText = http.StatusBadRequest, err.Error()
+		writeError(w, status, "invalid_request", errText, requestID)
+		return
+	}
 	s.auth.ApplyCodexHeaders(upstreamReq, credential, "text/event-stream")
 
 	resp, err := s.client.Do(upstreamReq)
@@ -339,7 +343,11 @@ func (s *Service) handlePassthroughJSON(w http.ResponseWriter, r *http.Request, 
 	}
 	req.Header.Set("Content-Type", "application/json")
 	copyCodexContextHeaders(req.Header, r.Header)
-	identity.applyHeaders(req.Header, r.Header, false)
+	if err = identity.applyHeaders(req.Header, r.Header, false); err != nil {
+		status, errText = http.StatusBadRequest, err.Error()
+		writeError(w, status, "invalid_request", errText, requestID)
+		return
+	}
 	s.auth.ApplyCodexHeaders(req, credential, "application/json")
 	resp, err := s.client.Do(req)
 	if err != nil {
